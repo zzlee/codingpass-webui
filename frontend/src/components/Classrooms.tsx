@@ -13,6 +13,7 @@ import {
   ChevronRight,
   ClipboardList,
   Copy,
+  Download,
   Hash,
   GraduationCap,
   Plus,
@@ -26,7 +27,7 @@ import SectionHeading from './SectionHeading'
 import PlagiarismModal from './PlagiarismModal'
 import { DifficultyBadge, EmptyState, ErrorNotice, Field, LoadingRow, MetaChip, Modal, Spinner } from './ui'
 import { useAuth } from '../authContext'
-import api, { ApiError } from '../api'
+import api, { ApiError, saveBlob } from '../api'
 import { useAsync } from '../useAsync'
 import { INPUT_CLASS, buttonClass, formatRelative, groupThousands } from '../format'
 import type { Classroom, ClassroomDetail } from '../types'
@@ -40,10 +41,13 @@ export interface ClassroomsProps {
 function ClassroomCard({
   classroom,
   canManage,
+  canExport,
   onOpenProblem,
 }: {
   classroom: Classroom
   canManage: boolean
+  /** Staff who may pull the whole class's marks (owner or admin). */
+  canExport: boolean
   onOpenProblem: (problemId: number) => void
 }) {
   const [open, setOpen] = useState(false)
@@ -51,6 +55,8 @@ function ClassroomCard({
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
+  const [exporting, setExporting] = useState(false)
+  const [exportError, setExportError] = useState<string | null>(null)
   const [auditProblem, setAuditProblem] = useState<{ id: number; title: string } | null>(null)
 
   const toggle = async () => {
@@ -75,6 +81,27 @@ function ClassroomCard({
       window.setTimeout(() => setCopied(false), 1400)
     } catch {
       setCopied(false)
+    }
+  }
+
+  /**
+   * Pull the server-side gradebook and save it as `gradebook_<code>.csv`.
+   *
+   * The CSV is built on the server (best attempt per problem, all attempts
+   * counted) and is UTF-8 with a BOM, so Excel opens the Chinese titles without
+   * an import wizard. The bytes never go through JSON parsing here.
+   */
+  const exportGradebook = async () => {
+    if (exporting) return
+    setExporting(true)
+    setExportError(null)
+    try {
+      const blob = await api.downloadGradebookCsv(classroom.id)
+      saveBlob(blob, `gradebook_${classroom.code}.csv`)
+    } catch (reason) {
+      setExportError(reason instanceof ApiError ? reason.detail : String(reason))
+    } finally {
+      setExporting(false)
     }
   }
 
@@ -138,6 +165,27 @@ function ClassroomCard({
 
       {open ? (
         <div className="border-t border-slate-800 bg-slate-950/40 px-3 py-3">
+          {canExport ? (
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void exportGradebook()}
+                disabled={exporting}
+                title="Every enrolled student x every problem of this class, best attempt per problem"
+                className={buttonClass('ghost', 'px-2 py-1.5 text-xs')}
+              >
+                {exporting ? <Spinner className="h-3.5 w-3.5" /> : <Download className="h-3.5 w-3.5" aria-hidden="true" />}
+                <span>匯出成績冊 (CSV)</span>
+              </button>
+              <span className="font-mono text-[10px] text-slate-600">
+                gradebook_{classroom.code}.csv
+              </span>
+              {exportError ? (
+                <span className="w-full text-[11px] text-rose-300">{exportError}</span>
+              ) : null}
+            </div>
+          ) : null}
+
           {loading ? <LoadingRow label="Loading roster…" /> : null}
           {error ? <ErrorNotice message={error} onRetry={() => void toggle()} /> : null}
 
@@ -358,6 +406,9 @@ export function Classrooms({ onOpenProblem }: ClassroomsProps) {
                 key={classroom.id}
                 classroom={classroom}
                 canManage={Boolean(user && classroom.teacher_id === user.id)}
+                canExport={Boolean(
+                  user && (user.role === 'admin' || classroom.teacher_id === user.id),
+                )}
                 onOpenProblem={onOpenProblem}
               />
             ))}

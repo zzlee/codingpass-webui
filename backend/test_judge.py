@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 
 from fastapi.testclient import TestClient
 
@@ -117,6 +118,50 @@ r = client.post("/api/run", json={"code": cpp_oom, "language": "cpp"}).json()
 check("cpp bad_alloc runtime_error", r["status"] == "runtime_error", (r["status"], r["stderr"][-200:]))
 check("cpp bad_alloc mentions memory", "memory" in r["stderr"].lower(), r["stderr"][-200:])
 
+# --- per-problem memory budget (``Problem.memory_limit_mb``) --------------- #
+# A teacher's per-problem budget has to reach ``RLIMIT_AS``. Whether the kernel
+# then *refuses* an allocation is host-dependent (some kernels do not enforce
+# ``RLIMIT_AS`` at all), so the probe reports the ceiling it was given instead of
+# depending on an allocation failing.
+limits_probe = r"""
+#include <stdio.h>
+#include <sys/resource.h>
+int main(void){ struct rlimit rl; getrlimit(RLIMIT_AS, &rl);
+printf("%llu\n", (unsigned long long)(rl.rlim_cur / (1024u*1024u))); return 0; }
+"""
+mb = compiler.MEMORY_LIMIT_BYTES // (1024 * 1024)
+result = compiler.run_code(limits_probe, "c", "", 5.0)
+check("run_code default keeps CODE_MEMORY_LIMIT_MB",
+      result.stdout.strip() == str(mb), (result.stdout.strip(), mb))
+result = compiler.run_code(limits_probe, "c", "", 5.0, memory_limit_mb=64)
+check("run_code applies memory_limit_mb", result.stdout.strip() == "64", result.stdout.strip())
+batch = compiler.run_code_batch(limits_probe, "c", ["", ""], 5.0, memory_limit_mb=48)
+check("run_code_batch applies memory_limit_mb",
+      [row.stdout.strip() for row in batch] == ["48", "48"],
+      [row.stdout.strip() for row in batch])
+check("compile phase stays exempt from the memory cap",
+      compiler.run_code(limits_probe, "c", "", 5.0, memory_limit_mb=16).status == "success")
+check("memory override clamps to the floor",
+      compiler._resolve_memory_limit_bytes(1) == compiler.MEMORY_LIMIT_FLOOR_MB * 1024 * 1024,
+      compiler._resolve_memory_limit_bytes(1) // 1024 ** 2)
+check("memory override clamps to the ceiling",
+      compiler._resolve_memory_limit_bytes(10 ** 6) == compiler.MEMORY_LIMIT_CEIL_MB * 1024 * 1024,
+      compiler._resolve_memory_limit_bytes(10 ** 6) // 1024 ** 2)
+check("a 0 or unusable override falls back to the default",
+      compiler._resolve_memory_limit_bytes(0) == compiler.MEMORY_LIMIT_BYTES
+      and compiler._resolve_memory_limit_bytes("nope") == compiler.MEMORY_LIMIT_BYTES)
+
+# The verdict must name the budget the student actually ran against.
+bad_alloc_note = (
+    "#include <stdio.h>\nint main(){ fprintf(stderr, \"std::bad_alloc\\n\"); return 1; }"
+)
+result = compiler.run_code(bad_alloc_note, "c", "", 5.0, memory_limit_mb=32)
+check("memory verdict quotes the active per-problem limit",
+      "memory limit of 32 MB" in result.stderr, result.stderr[-140:])
+result = compiler.run_code(bad_alloc_note, "c", "", 5.0)
+check("memory verdict falls back to the global limit",
+      f"memory limit of {mb} MB" in result.stderr, result.stderr[-140:])
+
 # --- nonzero exit --------------------------------------------------------- #
 r = client.post("/api/run", json={"code": "int main(){ return 7; }", "language": "c"}).json()
 check("nonzero exit -> runtime_error", r["status"] == "runtime_error" and r["exit_code"] == 7, r)
@@ -128,6 +173,65 @@ check("output truncated", r["status"] == "success" and r["truncated"], (len(r["s
 
 r = client.post("/api/run", json={"code": "#include <stdio.h>\n#include <stdlib.h>\nint main(){ puts(getenv(\"PATH\")?\"env-ok\":\"no-env\"); }", "language": "c"}).json()
 check("runs with stdin omitted", r["status"] == "success" and "env-ok" in r["stdout"], r)
+
+# --- detached descendant must never hang the judge ------------------------ #
+# A submission that forks, lets the parent exit and keeps the pipes open in the
+# child used to block ``_execute`` forever in ``stream.close()``: the judge thread
+# never returned and its MAX_CONCURRENT_RUNS slot was leaked permanently.
+orphan_src = """
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+int main(void) {
+    if (fork() == 0) { sleep(120); _exit(0); }   /* inherits stdout */
+    puts("parent done");
+    return 0;
+}
+"""
+_t0 = time.perf_counter()
+r = client.post("/api/run", json={"code": orphan_src, "language": "c", "stdin": "x" * 190_000}).json()
+_elapsed = time.perf_counter() - _t0
+check(
+    "orphan holding stdout does not hang the judge",
+    r["status"] == "success" and "parent done" in r["stdout"] and _elapsed < 12.0,
+    (r["status"], f"{_elapsed:.1f}s"),
+)
+
+# A program that never reads a large stdin used to pin the writer thread, and the
+# caller then blocked forever closing that same pipe. 190_000 bytes is more than
+# one pipe buffer, so the write really does block.
+_t0 = time.perf_counter()
+r = client.post(
+    "/api/run",
+    json={"code": "int main(){ return 0; }", "language": "c", "stdin": "x" * 190_000},
+).json()
+_elapsed = time.perf_counter() - _t0
+check(
+    "unconsumed huge stdin returns promptly",
+    r["status"] == "success" and _elapsed < 12.0,
+    (r["status"], f"{_elapsed:.1f}s"),
+)
+
+# --- fork bomb is capped by RLIMIT_NPROC (AGENTS.md rule) ----------------- #
+# 12 forks would be 4096 processes. The task limit must make fork() fail instead
+# of exhausting the host. Deliberately small - see AGENTS.md safety rules.
+fork_src = """
+#include <stdio.h>
+#include <unistd.h>
+int main(void) {
+    int failed = 0;
+    for (int i = 0; i < 12; i++) { if (fork() < 0) failed++; }
+    printf("failures=%d\\n", failed);
+    return 0;
+}
+"""
+r = client.post("/api/run", json={"code": fork_src, "language": "c"}).json()
+_created = r["stdout"].count("failures=")
+check(
+    "fork bomb cannot outgrow the task limit",
+    r["status"] == "success" and 0 < _created < 4096,
+    f"processes printed: {_created}",
+)
 
 # --- validation ----------------------------------------------------------- #
 r = client.post("/api/run", json={"code": "int main(){}", "language": "python"})

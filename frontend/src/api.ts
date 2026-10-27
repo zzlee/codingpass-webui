@@ -240,6 +240,71 @@ export function qs(params: Record<string, string | number | boolean | null | und
   return line ? `?${line}` : ''
 }
 
+/**
+ * Fetch a binary endpoint (PDF, CSV, …) and hand back the bytes.
+ *
+ * `request()` parses JSON, which is exactly wrong for a file, so downloads go
+ * through `fetch` directly here. The bearer token is attached by hand, a failure
+ * still surfaces as an {@link ApiError} with the server's `detail` (a `404` on a
+ * PDF says *why*), and a rejected token still logs the session out once.
+ */
+async function downloadBlob(path: string, timeoutMs = 120_000): Promise<Blob> {
+  const controller = new AbortController()
+  const timer = timeoutMs > 0 ? window.setTimeout(() => controller.abort(), timeoutMs) : null
+  const token = readStoredToken()
+
+  try {
+    const reply = await fetch(`/api${path}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      signal: controller.signal,
+    })
+    if (!reply.ok) {
+      const parsed = await reply.clone().json().catch(() => null)
+      const detail = flattenDetail(parsed ?? (await reply.text().catch(() => '')), reply.status)
+      if (reply.status === 401 && token && unauthorizedHandler) unauthorizedHandler()
+      throw new ApiError(reply.status, detail, parsed, statusText(reply.status))
+    }
+    return await reply.blob()
+  } catch (error) {
+    if (error instanceof ApiError) throw error
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new ApiError(
+        0,
+        `The download did not finish within ${Math.round(timeoutMs / 1000)}s.`,
+        null,
+        '',
+      )
+    }
+    throw new ApiError(
+      0,
+      `Cannot reach the CodingPass API: ${error instanceof Error ? error.message : String(error)}.`,
+      null,
+      '',
+    )
+  } finally {
+    if (timer !== null) window.clearTimeout(timer)
+  }
+}
+
+/**
+ * Save a blob under a fixed file name without leaving a dangling object URL.
+ *
+ * `<a download>` is the only way to force a *save* dialog; a blob URL opened in
+ * a tab instead lets the browser render the file (which is what a PDF wants).
+ */
+export function saveBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  link.rel = 'noopener'
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  // Revoke on the next task: Safari copies the URL when the click is handled.
+  window.setTimeout(() => URL.revokeObjectURL(url), 4_000)
+}
+
 /** Filters accepted by `GET /api/problems`. */
 export interface ProblemQuery {
   classroom_id?: number
@@ -285,11 +350,29 @@ export const api = {
 
   getClassroom: (id: number) => request<ClassroomDetail>(`/classrooms/${id}`),
 
+  /**
+   * Best-score-per-problem gradebook of one class, as a CSV blob.
+   *
+   * Staff only; the server already names the file, but the caller passes it to
+   * {@link saveBlob} so the download keeps a stable, local name.
+   */
+  downloadGradebookCsv: async (classroomId: number): Promise<Blob> =>
+    downloadBlob(`/classrooms/${classroomId}/gradebook.csv`),
+
   // -- problems ---------------------------------------------------------
   listProblems: (query: ProblemQuery = {}) =>
     request<ProblemListResponse>(`/problems${qs({ ...query })}`),
 
   getProblem: (id: number) => request<ProblemDetail>(`/problems/${id}`),
+
+  /**
+   * The pack's A4 statement PDF, as a blob.
+   *
+   * Fetched as a blob rather than linked directly because the endpoint needs an
+   * `Authorization` header, which a plain `<a href>` cannot carry.
+   */
+  downloadProblemPdf: async (problemId: number): Promise<Blob> =>
+    downloadBlob(`/problems/${problemId}/pdf`),
 
   createProblem: (payload: ProblemCreateRequest) =>
     request<ProblemDetail>('/problems', { method: 'POST', body: payload }),

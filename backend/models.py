@@ -293,9 +293,12 @@ class Problem(Base):
     )
     #: Wall-clock limit per test case handed to ``compiler.run_code``.
     time_limit_sec: Mapped[float] = mapped_column(Float, nullable=False, default=3.0)
-    #: Recorded memory budget for the exercise. The sandbox enforces the global
-    #: ``CODE_MEMORY_LIMIT_MB`` ceiling; this value is what the problem advertises
-    #: to students and what a future per-run cgroup will apply verbatim.
+    #: Recorded memory budget for the exercise. Handed verbatim to
+    #: ``compiler.run_code_batch`` as the per-submission ``RLIMIT_AS`` ceiling for
+    #: every submission to this problem, so the statement, the UI badge and the
+    #: limit a student actually hits are the same number (the sandbox clamps it
+    #: into ``MEMORY_LIMIT_FLOOR_MB..MEMORY_LIMIT_CEIL_MB``; when this column is
+    #: unusable the global ``CODE_MEMORY_LIMIT_MB`` still applies).
     memory_limit_mb: Mapped[int] = mapped_column(Integer, nullable=False, default=256)
     teacher_id: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True

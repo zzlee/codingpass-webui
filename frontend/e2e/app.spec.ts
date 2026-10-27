@@ -5,7 +5,7 @@ test.describe('CodingPass WebUI E2E Test Suite', () => {
     await page.goto('/')
 
     // Check Branding
-    await expect(page.getByText('CodingPass')).toBeVisible()
+    await expect(page.getByText('CodingPass', { exact: true })).toBeVisible()
     await expect(page.getByText('C/C++ judge')).toBeVisible()
 
     // Check Judge Online Health Pill
@@ -90,7 +90,8 @@ test.describe('CodingPass WebUI E2E Test Suite', () => {
     // Click to view classroom detail
     await page.getByText('C/C++ Programming 101').click()
 
-    // Verify student roster shows Alice
+    // Verify student roster shows Alice and Gradebook CSV export button is available
     await expect(page.getByText('Alice')).toBeVisible()
+    await expect(page.getByRole('button', { name: /匯出成績冊/ })).toBeVisible()
   })
 })

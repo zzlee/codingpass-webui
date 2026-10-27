@@ -274,6 +274,15 @@ int main(void){ char *p = malloc(300u*1024u*1024u);
   if (!p) return 3; memset(p, 1, 300u*1024u*1024u);
   return ((volatile char *)p)[0] == 99 ? 0 : 4; }
 """
+#: Reports a memory failure and exits non-zero. The judge then appends the budget
+#: that was actually in force, which is how the suite proves a problem's own
+#: ``memory_limit_mb`` - not ``CODE_MEMORY_LIMIT_MB`` - reached the sandbox.
+MEM_LIMIT_PROBE_C = """
+#include <stdio.h>
+int main(void){
+  fprintf(stderr, "terminate called after throwing an instance of 'std::bad_alloc'\\n");
+  return 3; }
+"""
 PRIME_CPP = """
 #include <iostream>
 using namespace std;
@@ -334,6 +343,20 @@ check("TLE is recorded on the submission row", report["passed_count"] == 0 and r
 
 r = call("post", f"/api/problems/{HARNESS}/submit", ALICE, json={"language": "c", "code": OOM_C})
 check("over-limit allocation -> runtime_error", r.json()["status"] == "runtime_error", r.json())
+
+# A teacher trial run keeps the submission counts below untouched while proving the
+# problem's own 64 MB budget - not the server's default - was the one enforced.
+r = call("post", f"/api/problems/{HARNESS}/submit", TEACHER, json={"language": "c", "code": MEM_LIMIT_PROBE_C})
+report = r.json()
+check("problem memory_limit_mb reaches the sandbox",
+      report["status"] == "runtime_error"
+      and "memory limit of 64 MB" in (report["results"][0]["stderr"] or ""),
+      report["results"][0]["stderr"])
+r = call("post", f"/api/problems/{TWO_SUM}/submit", TEACHER, json={"language": "c", "code": MEM_LIMIT_PROBE_C})
+report = r.json()
+check("a 256 MB problem quotes 256 MB",
+      "memory limit of 256 MB" in (report["results"][0]["stderr"] or ""),
+      report["results"][0]["stderr"])
 
 r = call("post", f"/api/problems/{HARNESS}/submit", TEACHER, json={"language": "c", "code": CORRECT_C})
 report = r.json()

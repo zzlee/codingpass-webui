@@ -2,9 +2,12 @@
  * Problem solving view: statement on the left, Monaco + judging on the right.
  *
  * Two judge paths live here:
- *  - **Run Samples** calls the public `POST /api/run` once per sample case and
- *    compares the output locally with the exact rules the judge uses
- *    (`normalizeOutput`). It is a scratchpad - nothing is stored.
+ *  - **Run Samples** is a scratchpad - nothing is stored. When the CodingPass
+ *    Local Agent is connected it sends one `run_batch` over the local WebSocket,
+ *    which compiles once and runs every sample case on the student's own machine;
+ *    otherwise (or when that request is refused or answers short) it falls back to
+ *    `POST /api/run` once per sample case. Either way the output is compared
+ *    locally with the exact rules the judge uses (`normalizeOutput`).
  *  - **Submit Solution** calls `POST /api/problems/{id}/submit`, which grades
  *    against every case including the hidden ones and records the attempt for
  *    students (a teacher/admin run is returned as `trial_run` and not stored).
@@ -19,6 +22,7 @@ import {
   BookOpen,
   Clock,
   EyeOff,
+  FileText,
   Gauge,
   Layers,
   LoaderCircle,
@@ -69,6 +73,11 @@ const LANGUAGE_OPTIONS: Array<{ value: Language; label: string; hint: string }> 
   { value: 'cpp', label: 'C++', hint: 'g++ -O2 -std=c++17' },
 ]
 
+/** Result-panel heading for runs that never touch the server. */
+const LOCAL_RUN_HEADING = '本地加速執行 (Local Agent) - 未計入成績'
+/** Result-panel heading for runs judged by `POST /api/run`. */
+const SERVER_RUN_HEADING = 'Sample run - not recorded'
+
 /**
  * Client side deadline for a whole submission: every case may burn the problem's
  * time limit plus a compile allowance, so a 10-case problem at 2s needs ~35s.
@@ -100,14 +109,18 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
   const [notice, setNotice] = useState<string | null>(null)
   const [runningSamples, setRunningSamples] = useState(false)
   const [submitting, setSubmitting] = useState(false)
+  const [openingPdf, setOpeningPdf] = useState(false)
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null)
 
   // Mirrors for the keyboard handler so `Ctrl+Enter` never reads a stale value.
-  const stateRef = useRef({ language, sources, problem })
+  // The agent handle is mirrored too: `runSamples` has no reactive dependencies,
+  // so reading `localAgent` from its closure would freeze the first render's
+  // 'disconnected' status and the local path would never be taken.
+  const stateRef = useRef({ language, sources, problem, localAgent })
   const busyRef = useRef(false)
 
   useEffect(() => {
-    stateRef.current = { language, sources, problem }
+    stateRef.current = { language, sources, problem, localAgent }
   })
 
   /* ---------------------------------------------------------------- load */
@@ -174,9 +187,24 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
   }
 
   /* --------------------------------------------------------- run samples */
+  /**
+   * Run every sample case without recording anything.
+   *
+   * Two execution paths, one report shape:
+   *
+   *  - **Local Agent connected** - a single `run_batch` request compiles the
+   *    source once and runs all sample cases on the student's own machine, so a
+   *    five-case statement costs one build instead of five, and the classroom
+   *    server is not involved at all.
+   *  - **Anything else** (no agent, a refused or short batch) - the server path,
+   *    one `POST /api/run` per sample, sequentially on purpose: it keeps a single
+   *    student from occupying every judge slot while the class is submitting at
+   *    the same time.
+   */
   const runSamples = useCallback(async (): Promise<void> => {
     const current = stateRef.current
     const detail = current.problem
+    const agent = current.localAgent
     if (!detail || busyRef.current) return
     const samples = detail.test_cases.filter((row) => row.is_sample)
     if (samples.length === 0) {
@@ -196,36 +224,31 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
       error: null,
       passed: false,
     }))
+    const source = current.sources[current.language]
 
-    try {
-      // Sequential on purpose: it keeps a single student from occupying every
-      // judge slot while the class is submitting at the same time.
+    /** Score one verdict per sample (same order) and render the report. */
+    const fillFromResponses = (responses: RunResponse[], heading: string) => {
+      samples.forEach((testCase, index) => {
+        const response = responses[index]
+        runs[index] = {
+          ...runs[index],
+          response,
+          passed: response.status === 'success' && outputsMatch(response.stdout, testCase.expected_output),
+        }
+      })
+      setProgress({ done: samples.length, total: samples.length })
+      setReport(fromSampleRuns(runs, heading))
+    }
+
+    /** Judge the samples on the server, one case at a time, reporting progress. */
+    const runOnServer = async () => {
       for (let index = 0; index < samples.length; index += 1) {
         const testCase = samples[index]
         try {
-          let response: RunResponse
-          if (localAgent.status === 'connected') {
-            try {
-              response = await localAgent.runLocally({
-                code: current.sources[current.language],
-                language: current.language,
-                stdin: testCase.input,
-                timeout_sec: Math.max(1, Math.ceil(detail.time_limit_sec)),
-              })
-            } catch (localErr) {
-              console.warn('Local agent run failed, falling back to server:', localErr)
-              response = await api.run(
-                { code: current.sources[current.language], language: current.language, stdin: testCase.input },
-                sampleTimeout(detail),
-              )
-            }
-          } else {
-            response = await api.run(
-              { code: current.sources[current.language], language: current.language, stdin: testCase.input },
-              sampleTimeout(detail),
-            )
-          }
-
+          const response = await api.run(
+            { code: source, language: current.language, stdin: testCase.input },
+            sampleTimeout(detail),
+          )
           runs[index] = {
             ...runs[index],
             response,
@@ -240,9 +263,37 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
           break
         }
         setProgress({ done: index + 1, total: samples.length })
-        setReport(fromSampleRuns(runs, localAgent.status === 'connected' ? '本地加速執行 (Local Agent) - 未計入成績' : 'Sample run - not recorded'))
+        setReport(fromSampleRuns(runs, SERVER_RUN_HEADING))
       }
-      setReport(fromSampleRuns(runs, localAgent.status === 'connected' ? '本地加速執行 (Local Agent) - 未計入成績' : 'Sample run - not recorded'))
+      setReport(fromSampleRuns(runs, SERVER_RUN_HEADING))
+    }
+
+    try {
+      let gradedLocally = false
+      if (agent.status === 'connected') {
+        try {
+          const responses = await agent.runBatchLocally({
+            code: source,
+            language: current.language,
+            stdin_list: samples.map((testCase) => testCase.input),
+            timeout_sec: Math.max(1, Math.ceil(detail.time_limit_sec)),
+          })
+          if (responses.length === samples.length) {
+            fillFromResponses(responses, LOCAL_RUN_HEADING)
+            gradedLocally = true
+          } else {
+            // One verdict per case is the batch contract. A short answer is judged
+            // on the server rather than reporting a partial - and possibly wrong -
+            // score, and the student still gets an answer instead of an error.
+            console.warn(
+              `Local Agent answered ${responses.length}/${samples.length} sample cases; falling back to the server.`,
+            )
+          }
+        } catch (localErr) {
+          console.warn('Local agent batch run failed, falling back to server:', localErr)
+        }
+      }
+      if (!gradedLocally) await runOnServer()
     } finally {
       setProgress(null)
       setRunningSamples(false)
@@ -278,6 +329,33 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
   useCtrlEnter(() => {
     if (!busyRef.current) void runSamples()
   })
+
+  /* ------------------------------------------------------ statement PDF */
+  /**
+   * Stream the pack's statement PDF into a new browser tab.
+   *
+   * The endpoint is JWT-guarded, so the file arrives as a blob and is shown via
+   * an object URL rather than a plain link. If the popup blocker swallows the
+   * tab the blob is already in memory, so say so instead of failing silently.
+   */
+  const openStatementPdf = useCallback(async (): Promise<void> => {
+    const detail = stateRef.current.problem
+    if (!detail || openingPdf) return
+    setOpeningPdf(true)
+    setNotice(null)
+    try {
+      const blob = await api.downloadProblemPdf(detail.id)
+      const url = URL.createObjectURL(blob)
+      const opened = window.open(url, '_blank')
+      if (!opened) setNotice('Your browser blocked the new tab - allow pop-ups to read the PDF.')
+      // Keep the URL alive long enough for the new tab to load the bytes.
+      window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
+    } catch (reason) {
+      setNotice(reason instanceof ApiError ? reason.detail : String(reason))
+    } finally {
+      setOpeningPdf(false)
+    }
+  }, [openingPdf])
 
   /* ------------------------------------------------------------- render */
   const samples = useMemo(
@@ -354,6 +432,22 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
           <MetaChip icon={<EyeOff className="h-3 w-3" aria-hidden="true" />}>
             {problem.hidden_count} hidden
           </MetaChip>
+          {problem.has_statement_pdf ? (
+            <button
+              type="button"
+              onClick={() => void openStatementPdf()}
+              disabled={openingPdf}
+              title="Open the official statement PDF in a new tab"
+              className={buttonClass('ghost', 'px-2 py-1 text-[10px]')}
+            >
+              {openingPdf ? (
+                <Spinner className="h-3 w-3" />
+              ) : (
+                <FileText className="h-3 w-3" aria-hidden="true" />
+              )}
+              <span>📄 題目 PDF</span>
+            </button>
+          ) : null}
           {report && tone ? (
             <span className={`rounded-md border px-2 py-1 font-mono text-[10px] font-semibold ${tone.pill}`}>
               last {formatScore(report.score)} · {countText(report.passed, report.total)}

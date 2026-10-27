@@ -19,11 +19,15 @@ Endpoints
 ``POST /api/classrooms``             teacher creates a class (invite code).
 ``POST /api/classrooms/join``        student joins with an invite code.
 ``GET  /api/classrooms/{id}``        class detail with the enrolled roster.
+``GET  /api/classrooms/{id}/gradebook.csv``
+                                     best-score-per-problem grid for the class,
+                                     as a spreadsheet-ready CSV (staff only).
 
 **Problem bank**
 ``GET  /api/problems``               problems visible to the caller.
 ``POST /api/problems``               teacher creates a problem with test cases.
 ``GET  /api/problems/{id}``          detail + starter code + *sample* cases only.
+``GET  /api/problems/{id}/pdf``       stream the pack's statement PDF inline.
 ``POST /api/problems/{id}/testcases`` teacher appends one test case.
 ``POST /api/problems/{id}/submit``   judge a submission against **all** cases.
 ``GET  /api/submissions``            own submissions, or a teacher's class view.
@@ -54,13 +58,17 @@ See ``compiler.py`` for the sandbox limits (timeout, memory, output size).
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import json
 import logging
 import os
 import re
 import secrets
 import shutil
+import stat
 import tempfile
+import zipfile
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -69,6 +77,7 @@ from typing import Annotated, Literal, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, Response
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, ValidationError, field_validator
 from sqlalchemy import case, func, or_
@@ -85,6 +94,7 @@ try:  # package-style launch: `uvicorn backend.main:app`
         RunResult,
         limits_summary,
         run_code,
+        run_code_batch,
         supported_languages,
         toolchain_versions,
     )
@@ -96,6 +106,7 @@ except ImportError:  # flat launch: `uvicorn main:app` / `python main.py`
         RunResult,
         limits_summary,
         run_code,
+        run_code_batch,
         supported_languages,
         toolchain_versions,
     )
@@ -213,9 +224,10 @@ MAX_EXPECTED_CHARS = 100_000
 MAX_DESCRIPTION_CHARS = 20_000
 #: How many submissions may be compiled/executed simultaneously.
 MAX_CONCURRENT_RUNS = max(1, int(os.environ.get("MAX_CONCURRENT_RUNS", "4")))
-#: Test cases per problem. A submission is judged case by case, so this also
-#: bounds the worst-case latency of ``POST /api/problems/{id}/submit``
-#: (``test_cases x (compile + time_limit)``).
+#: Test cases per problem. A submission is compiled once and then run case by
+#: case, so this bounds the worst-case latency of
+#: ``POST /api/problems/{id}/submit``
+#: (``compile + test_cases x time_limit``).
 MAX_TEST_CASES = 50
 #: Teacher-selectable bounds for the per-problem limits.
 MIN_TIME_LIMIT_SEC = 0.1
@@ -663,7 +675,10 @@ class ProblemCreate(BaseModel):
         default=MEMORY_LIMIT_BYTES // (1024 * 1024),
         ge=MIN_MEMORY_LIMIT_MB,
         le=MAX_MEMORY_LIMIT_MB,
-        description="Advertised budget; the sandbox ceiling is CODE_MEMORY_LIMIT_MB.",
+        description=(
+            "Address-space budget (RLIMIT_AS) enforced for every submission to "
+            "this problem; defaults to the sandbox ceiling CODE_MEMORY_LIMIT_MB."
+        ),
     )
     classroom_id: Optional[int] = Field(
         default=None,
@@ -727,7 +742,12 @@ class ProblemDetail(ProblemSummary):
     starter_code_cpp: str = ""
     test_cases: list[TestCasePublic] = Field(default_factory=list)
     pdf_path: Optional[str] = Field(
-        default=None, description="Filesystem path to the statement PDF (if available)."
+        default=None,
+        description=(
+            "Server path of the statement PDF, **staff only**: students get the "
+            "problem's own ``/pdf`` endpoint instead, and must not learn the "
+            "layout of the server's filesystem."
+        ),
     )
     wording_rules: Optional[str] = Field(
         default=None,
@@ -1361,20 +1381,40 @@ async def agent_info() -> dict:
 
 @app.get("/api/agent/download")
 async def download_agent_package():
-    """Download a standalone zip containing the Local Agent runner."""
+    """Download a standalone zip containing the Local Agent runner.
+
+    Public on purpose: a student needs the runner before they have anything to
+    authenticate with. The file list is fixed, so this is not a file reader, and
+    a server without the ``local_agent`` folder answers ``404`` instead of
+    handing out a valid-but-empty archive.
+    """
     agent_dir = Path(__file__).resolve().parent.parent / "local_agent"
+    members = [
+        (agent_dir / name, name)
+        for name in ("agent.py", "run_agent.sh", "run_agent.bat", "README.md")
+        if (agent_dir / name).is_file()
+    ]
+    if not any(name == "agent.py" for _, name in members):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="The Local Agent package is not installed on this server.",
+        )
+
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        if agent_dir.is_dir():
-            for fname in ("agent.py", "run_agent.sh", "run_agent.bat", "README.md"):
-                fpath = agent_dir / fname
-                if fpath.is_file():
-                    zf.write(fpath, arcname=f"codingpass-agent/{fname}")
+        for fpath, name in members:
+            zf.write(fpath, arcname=f"codingpass-agent/{name}")
     buf.seek(0)
     return Response(
         content=buf.getvalue(),
         media_type="application/zip",
-        headers={"Content-Disposition": 'attachment; filename="codingpass-agent.zip"'},
+        headers={
+            "Content-Disposition": 'attachment; filename="codingpass-agent.zip"',
+            # The runner executes on a student machine: never serve a stale copy
+            # from a shared cache.
+            "Cache-Control": "no-cache",
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 
 
@@ -1490,8 +1530,9 @@ def _judge_all_cases(
     language: str,
     cases: list[TestCase],
     timeout_seconds: float,
+    memory_limit_mb: Optional[int] = None,
 ) -> JudgeReport:
-    """Compile and execute ``code`` once per test case and score the outputs.
+    """Compile ``code`` **once**, run it on every test case and score the outputs.
 
     Runs in a worker thread. A compile failure short-circuits the loop (every
     case would fail identically); a sandbox ``internal_error`` aborts the whole
@@ -1499,15 +1540,34 @@ def _judge_all_cases(
     crashing on one case does **not** stop the remaining cases: a partially
     correct program still earns credit for the cases it survived.
 
-    Each call re-compiles, because :func:`compiler.run_code` owns the whole
-    compile-and-run lifecycle inside one isolated temporary directory. Worst-case
-    latency is therefore ``len(cases) * (compile + timeout_seconds)``; that is
-    what ``MAX_TEST_CASES`` bounds.
+    ``memory_limit_mb`` is the problem's advertised budget, handed to the sandbox
+    verbatim so the statement, the UI badge and the ``RLIMIT_AS`` the student hits
+    are the same number (``None`` falls back to the global ceiling).
+
+    Compilation happens once, through :func:`compiler.run_code_batch`, which
+    builds the binary a single time in one isolated temporary directory and then
+    executes it once per test case in a private sub-directory. Worst-case latency
+    is therefore ``compile + len(cases) * timeout_seconds`` instead of
+    ``len(cases) * (compile + timeout_seconds)``; ``MAX_TEST_CASES`` still bounds
+    the run phase.
     """
     report = JudgeReport()
-    for case_row in cases:
-        result: RunResult = run_code(code, language, case_row.input, timeout_seconds)
-
+    results: list[RunResult] = run_code_batch(
+        code,
+        language,
+        [case_row.input for case_row in cases],
+        timeout_seconds,
+        memory_limit_mb=memory_limit_mb,
+    )
+    if len(results) != len(cases):
+        # Alignment is the contract of the batch API. A short answer must never
+        # be graded: silently dropping cases would change the score.
+        report.judge_error = _clip(
+            f"the sandbox returned {len(results)} verdict(s) for "
+            f"{len(cases)} test case(s)"
+        )
+        return report
+    for case_row, result in zip(cases, results):
         if result.status == Status.COMPILE_ERROR:
             report.compile_failed = True
             report.compile_output = result.compile_output
@@ -2021,7 +2081,10 @@ def _problem_detail(problem: Problem, reveal_hidden: bool) -> ProblemDetail:
         description=problem.description,
         starter_code_c=problem.starter_code_c,
         starter_code_cpp=problem.starter_code_cpp,
-        pdf_path=problem.pdf_path,
+        # An absolute server path. Students fetch the document through
+        # ``GET /api/problems/{id}/pdf``; handing them the path only tells an
+        # attacker where the platform keeps its files (and what it is called).
+        pdf_path=problem.pdf_path if reveal_hidden else None,
         test_cases=[
             TestCasePublic(
                 id=case_row.id,
@@ -2388,6 +2451,157 @@ async def read_classroom(
     return _classroom_detail(db, classroom)
 
 
+def _gradebook_effective_score(submission: Submission) -> float:
+    """Score one attempt counts for in the gradebook.
+
+    A teacher's manual mark is the authoritative verdict for an attempt, so it
+    wins over the judge's pass percentage - including when the teacher awarded
+    ``0.0``, which is a decision and not a missing value.
+    """
+    return submission.teacher_score if submission.teacher_score is not None else submission.score
+
+
+#: Leading characters that turn a spreadsheet cell into a formula. Everything
+#: below is cell text a *student* (full name, e-mail) or a problem title controls,
+#: and the file is opened by a teacher on their own machine.
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_cell(value: object) -> str:
+    """Render one free-text cell so a spreadsheet cannot execute it as a formula.
+
+    ``csv.writer`` already quotes delimiters and newlines; it does nothing about
+    ``=cmd|...`` or ``+1-5555...``, which Excel and LibreOffice happily evaluate
+    on open (CSV injection). A leading apostrophe marks the cell as text and is
+    the conventional, lossless neutralisation.
+    """
+    text = "" if value is None else str(value)
+    return "'" + text if text.startswith(_CSV_FORMULA_PREFIXES) else text
+
+
+@app.get(
+    "/api/classrooms/{classroom_id}/gradebook.csv",
+    response_class=Response,
+    summary="Class gradebook as a CSV export",
+)
+async def classroom_gradebook_csv(
+    classroom_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles(Role.ADMIN, Role.TEACHER)),
+) -> Response:
+    """Export one class's gradebook as a spreadsheet-ready CSV download.
+
+    One row per enrolled student, two columns per problem published to the class
+    (``<code>_<title>_score`` and ``<code>_attempts``) plus ``average_score`` and
+    ``total_score`` at the end. The score column carries the student's **best**
+    attempt for that problem: ``teacher_score`` whenever a teacher graded the
+    attempt (their mark is the verdict, even when it is lower than the judge's),
+    otherwise the judge's ``score``; among equal marks the newest attempt wins -
+    while ``attempts`` counts every recorded submission, so a student who ground
+    through ten wrong answers is still visible.
+
+    ``total_score`` sums those best scores over the problems published to the
+    class (an unattempted problem contributes ``0.0``) and ``average_score``
+    divides it by the number of problems, so the two columns always agree.
+
+    The body is UTF-8 **with a BOM**: the sheet is full of Chinese problem
+    titles, and Excel on Windows only decodes a BOM-less file as UTF-8 by
+    accident. Staff only - the export names every student in the class with their
+    e-mail address and their marks, so it is explicitly ``no-store``: a graded
+    roster of minors must not sit in any browser or proxy cache.
+
+    Every free-text cell goes through :func:`_csv_cell`, because names, e-mail
+    addresses and problem titles are attacker-writable and a teacher opens this
+    file in a spreadsheet.
+    """
+    classroom = _load_classroom(db, classroom_id)
+    if not user.is_admin and classroom.teacher_id != user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not teach that class.",
+        )
+
+    students = (
+        db.query(User)
+        .join(ClassroomMembership, ClassroomMembership.student_id == User.id)
+        .filter(ClassroomMembership.classroom_id == classroom.id)
+        .order_by(User.id)
+        .all()
+    )
+    problems = (
+        db.query(Problem)
+        .filter(Problem.classroom_id == classroom.id)
+        .order_by(Problem.id)
+        .all()
+    )
+
+    #: (student_id, problem_id) -> (best score, attempt count)
+    grades: dict[tuple[int, int], tuple[float, int]] = {}
+    if students and problems:
+        rows = (
+            db.query(Submission)
+            .filter(
+                Submission.problem_id.in_([problem.id for problem in problems]),
+                Submission.student_id.in_([student.id for student in students]),
+            )
+            # Ascending id: a later attempt replaces an earlier one on a tie, so
+            # the newest work is the one that ends up on the sheet.
+            .order_by(Submission.id)
+            .all()
+        )
+        for row in rows:
+            key = (row.student_id, row.problem_id)
+            score = _gradebook_effective_score(row)
+            best, attempts = grades.get(key, (0.0, 0))
+            grades[key] = (score if score >= best else best, attempts + 1)
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    header = ["student_id", "username", "full_name", "email"]
+    for problem in problems:
+        label = problem.problem_code or f"P{problem.id}"
+        header.append(_csv_cell(f"{label}_{problem.title}_score"))
+        header.append(_csv_cell(f"{label}_attempts"))
+    header.extend(["average_score", "total_score"])
+    writer.writerow(header)
+
+    problem_ids = [problem.id for problem in problems]
+    for student in students:
+        line = [
+            student.id,
+            _csv_cell(student.username),
+            _csv_cell(student.full_name),
+            _csv_cell(student.email),
+        ]
+        total = 0.0
+        for problem_id in problem_ids:
+            best, attempts = grades.get((student.id, problem_id), (0.0, 0))
+            total += best
+            line.append(round(best, 2))
+            line.append(attempts)
+        line.append(round(total / len(problem_ids), 2) if problem_ids else 0.0)
+        line.append(round(total, 2))
+        writer.writerow(line)
+
+    logger.info(
+        "staff %s exported the gradebook for class %s (%d students, %d problems)",
+        user.id,
+        classroom.code,
+        len(students),
+        len(problems),
+    )
+    return Response(
+        content=("\ufeff" + buffer.getvalue()).encode("utf-8"),
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f"attachment; filename=gradebook_{classroom.code}.csv",
+            # Personal data of a whole class: never cacheable, never sniffable.
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Problem bank endpoints
 # --------------------------------------------------------------------------- #
@@ -2550,6 +2764,90 @@ async def add_problem_test_case(
     db.commit()
     db.refresh(problem)
     return _problem_detail(problem, reveal_hidden=True)
+
+
+@app.get(
+    "/api/problems/{problem_id}/pdf",
+    response_class=Response,
+    summary="Statement PDF of a problem",
+)
+async def read_problem_pdf(
+    problem_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+) -> FileResponse:
+    """Stream the A4 statement PDF that came with the problem's pack.
+
+    The file is served ``inline`` so the browser renders it in the tab or PDF
+    viewer instead of forcing a download. Authorisation is exactly the problem's
+    own visibility rule (:func:`_assert_problem_visible`): a student who joined
+    the class may read the statement, a caller who may not open the problem may
+    not read the PDF either.
+
+    ``pdf_path`` is written by the pack importer, never taken from a request, and
+    it is only handed out when it names a ``*.pdf`` **regular file** - not a
+    symlink. That distinction is the whole point: a pack folder is a path a
+    teacher chooses, ``FileResponse`` follows symlinks, and the media type is a
+    label rather than a check, so a ``statement.pdf`` symlink would otherwise
+    turn this endpoint into an arbitrary file read of anything the server user can
+    open. Out-of-store paths are still served (that is how a folder pack works)
+    but are logged when ``PROBLEM_PACK_ROOTS`` is configured, because that is
+    where a misused teacher account would point.
+
+    A pack without a statement, or a PDF that has since been moved on disk,
+    answers ``404`` - never the path, and never a guess about why.
+    """
+    problem = _load_problem(db, problem_id)
+    _assert_problem_visible(problem, user, db)
+
+    missing = HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="This problem does not have a statement PDF.",
+    )
+    pdf_path = (problem.pdf_path or "").strip()
+    if not pdf_path or not pdf_path.lower().endswith(".pdf"):
+        raise missing
+
+    try:
+        # ``follow_symlinks=False`` is deliberate: what must be a regular file is
+        # the stored path itself, not whatever it happens to point at.
+        inode = os.stat(pdf_path, follow_symlinks=False)
+    except OSError:
+        raise missing from None
+    if stat.S_ISLNK(inode.st_mode) or not stat.S_ISREG(inode.st_mode):
+        logger.warning(
+            "problem %s: statement PDF is not a regular file; refusing to serve it",
+            problem.id,
+        )
+        raise missing
+
+    try:
+        resolved_pdf = Path(pdf_path).resolve()
+        in_store = resolved_pdf.is_relative_to(_pack_pdf_dir().resolve())
+        in_root = any(
+            resolved_pdf == root or root in resolved_pdf.parents
+            for root in PACK_ALLOWED_ROOTS
+        )
+    except OSError:  # pragma: no cover - unreadable parent directory
+        in_store = in_root = False
+    if PACK_ALLOWED_ROOTS and not (in_store or in_root):
+        logger.warning(
+            "problem %s: statement PDF is outside the PDF store and PROBLEM_PACK_ROOTS",
+            problem.id,
+        )
+
+    return FileResponse(
+        pdf_path,
+        media_type="application/pdf",
+        filename=f"problem_{problem.id}.pdf",
+        content_disposition_type="inline",
+        headers={
+            # The bytes came out of a teacher's archive: do not let the browser
+            # second-guess the type, and do not let a PDF that carries script
+            # reach this site's origin.
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+            "Cache-Control": "private, no-store",
+        },
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -2906,8 +3204,11 @@ async def submit_to_problem(
         got; it never returns the repaired source.
 
     The whole run holds one of the ``MAX_CONCURRENT_RUNS`` judge slots, so the
-    wall-clock cost (up to ``test_cases x (compile + time_limit)``) is bounded and
-    shared fairly with ``POST /api/run``. The probe takes a slot of its own.
+    wall-clock cost (``compile + test_cases x time_limit``: the source is built
+    once and the binary is re-executed per case) is bounded and
+    shared fairly with ``POST /api/run``. The probe takes a slot of its own. The
+    problem's own ``memory_limit_mb`` - not the server default - is the
+    ``RLIMIT_AS`` ceiling the submission runs under.
     """
     problem = _load_problem(db, problem_id)
     _assert_problem_visible(problem, user, db)
@@ -2920,9 +3221,17 @@ async def submit_to_problem(
         )
 
     timeout = min(max(float(problem.time_limit_sec), MIN_TIME_LIMIT_SEC), MAX_TIME_LIMIT_SEC)
+    # The advertised per-problem budget is the enforced one: ``RLIMIT_AS`` for the
+    # submission is this number (clamped by the sandbox), not the global default.
+    memory_limit_mb = int(problem.memory_limit_mb)
     async with _execution_slots(request):
         report = await run_in_threadpool(
-            _judge_all_cases, payload.code, payload.language, cases, timeout
+            _judge_all_cases,
+            payload.code,
+            payload.language,
+            cases,
+            timeout,
+            memory_limit_mb,
         )
     if report.judge_error:
         # The sandbox itself failed (missing compiler, unwritable tmpfs, ...).

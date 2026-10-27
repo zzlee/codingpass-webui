@@ -247,7 +247,7 @@ cd backend && ./venv/bin/python test_ai_phase4.py
 1. **零外部依賴 WebSocket 代理服務 (`local_agent/agent.py`)**：
    - 僅依賴 Python 3.8+ 內建標準函式庫（`asyncio`, `struct`, `hashlib`, `subprocess`, `tempfile`），完全不需 `pip install` 任何套件。
    - 支援 RFC 6455 雙向 Framing、Masking / Unmasking、Ping-Pong、自動編譯器探測（GCC / Clang）。
-   - 內建進程群組隔離 (`os.setsid`) 與超時終止保護，防止學生死迴圈掛住。
+   - 內建進程群組隔離 (POSIX `start_new_session` / Windows `CREATE_NEW_PROCESS_GROUP`)、256KB 輸出上限與逾時整棵進程樹殲滅 (`killpg` / `taskkill /F /T`)，防止學生死迴圈、狂印字元與 fork 殭屍進程掛住本機。
 2. **跨平台一鍵啟動腳本**：
    - `local_agent/run_agent.sh` (Linux / macOS 可執行腳本)
    - `local_agent/run_agent.bat` (Windows 批次檔)
@@ -272,8 +272,77 @@ cd backend && ./venv/bin/python test_ai_phase4.py
 | 測試模組 / 建置項目 | 測試內容與涵蓋範圍 | 測試結果 |
 |---|---|---|
 | **`test_stage34.py`** | 題目包匯入、PDF 留存、五項規程、最小修復探針、AST/Token 抄襲檢測 | ✅ **0 FAILED (35+ PASS)** |
-| **`test_judge.py`** | C/C++ 編譯、超時保護、記憶體上限、進程群組清理、殭屍進程防護 | ✅ **0 FAILED (28/28 PASS)** |
-| **`test_api.py`** | 認證、班級、出題、測資批次評測、權限隔離、歷史紀錄 | ✅ **0 FAILED (91/91 PASS)** |
+| **`test_judge.py`** | C/C++ 編譯、超時保護、記憶體上限、進程群組清理、孤兒 Pipe 防卡死、`RLIMIT_NPROC` 防護 | ✅ **0 FAILED (45/45 PASS)** |
+| **`test_api.py`** | 認證、班級、出題、測資批次評測、依題目套用 `memory_limit_mb`、權限隔離、歷史紀錄 | ✅ **0 FAILED (93/93 PASS)** |
 | **`test_ai_phase4.py`** | AI 狀態、即時診斷、隱藏測資防洩漏、AI 講評、教師覆核與遷移 | ✅ **0 FAILED (85/85 PASS)** |
-| **`test_agent.py`** | Local Agent 編譯器探測、本地執行、RFC 6455 WebSocket 協議整合 | ✅ **0 FAILED (100% PASS)** |
-| **前端建置 (`npm run build`)** | React 18 + TypeScript + Monaco Editor + Tailwind | ✅ **0 ERRORS (Built in 1.4s)** |
+| **`test_statement_pdf_gradebook.py`** | 題目 PDF 串流與 Symlink 防護、班級成績冊 CSV 匯出與公式注入防護 | ✅ **0 FAILED (33/33 PASS)** |
+| **`test_agent.py`** | Local Agent 編譯器探測、本地執行、輸出截斷、進程樹清理、Origin 白名單 (CSWSH)、`run_batch` 編譯一次執行多次 | ✅ **0 FAILED (100% PASS)** |
+| **`frontend/e2e/app.spec.ts`** | Playwright 無頭瀏覽器 E2E 測試（健康度、Local Agent 彈窗、角色切換、題庫、班級與成績冊匯出） | ✅ **0 FAILED (5/5 PASS in 4.8s)** |
+| **前端建置 (`npm run build`)** | React 18 + TypeScript + Monaco Editor (C/C++ 專屬精簡包) + Tailwind | ✅ **0 ERRORS (Built in 0.75s)** |
+
+---
+
+## 10. 專案未來改善方向與架構演進藍圖 (Future Improvements & Roadmap)
+
+經過對目前程式碼庫的全面靜態檢視與壓力情境分析，專案在**評測吞吐量、資訊安全、教學功能、前端效能與工程維護性**六大維度仍有以下具體且高價值的演進空間：
+
+### 10.1 評測效能與高併發交卷瓶頸 (Judge Performance & Concurrency)
+1. **「編譯一次、執行多次」(Compile-Once, Run-Many) 優化（最高優先級）**：
+   - **現況瓶頸**：`backend/main.py` 中的 `_judge_all_cases()` 目前在 `for case_row in cases:` 迴圈內逐筆呼叫 `compiler.run_code()`。當匯入含有 2 筆範例 + 30 筆隨機隱藏測資的題目時，**單次正式交卷會重複啟動 `g++` 編譯同一份程式碼 32 次**（耗費約 12～16 秒純編譯時間）；前端 `ProblemSolver.tsx` 的 `runSamples()` 亦會對每筆範例分別發送編譯請求。
+   - **改善方案**：比照 `backend/teda_engine.py` 的 `run_dual_run()`，在獨立暫存目錄中**僅編譯一次**產出執行檔 `solution`，隨後針對 32 筆 `stdin` 重複執行該二進位檔（或支援批次 `run-batch` 介面）。單次 Submit 延遲可從 ~15 秒驟降至 **0.5 秒以內（提速 25～30 倍）**。
+   - **已處置 (v1.2)**：伺服器端已由 `compiler.run_code_batch()` 於單一暫存目錄編譯一次、每筆測資獨立子目錄執行，`_judge_all_cases()` 不再逐筆編譯；前端 `ProblemSolver.runSamples()` 於 Local Agent 連線時改發單一 `run_batch` 请求（一次編譯、全部範例本地執行），僅在代理未連線、拒答或回傳筆數不符時才退回逐筆 `POST /api/run`。
+2. **非同步批改佇列與即時進度推播 (Async Task Queue + SSE/WebSocket)**：
+   - **現況瓶頸**：課堂測驗結束前最後一分鐘，若 40 名學生同時點擊 `Submit`，同步 HTTP 請求需排隊等待 `MAX_CONCURRENT_RUNS=4` 號誌與 Minimal Patch Probe（最多 20 次探針編譯），容易觸發瀏覽器端 HTTP Timeout。
+   - **改善方案**：將 `POST /api/problems/{id}/submit` 改為非阻塞入列（立即回傳 `202 Accepted` 與 `submission_id`），由背景 Worker Pool 消化佇列，並透過 Server-Sent Events (SSE) 向學生端即時推播批改進度（如：`編譯成功 -> 測試中 (14/32) -> 啟動修復探針...`）。
+
+### 10.2 學生端 Local Agent 安全加固與零安裝打包 (Local Agent Security & Packaging)
+1. **Cross-Site WebSocket Hijacking (CSWSH) 防護**：
+   - **已處置 (v1.1)**：`MinimalWebSocket.handshake()` 已強制檢查 `Origin` 標頭（`is_allowed_origin()`）：僅放行 `localhost` / `127.0.0.1` / `[::1]` 與 `192.168.` / `10.` / `172.` 內網前綴，另可用環境變數 `CODINGPASS_ALLOWED_ORIGINS`（逗號分隔）放行課堂伺服器網域；其餘來源直接回覆 `HTTP/1.1 403 Forbidden`（測試 `test_agent.py` 已驗證 `https://evil.example.com` 被拒）。不帶 `Origin` 的非瀏覽器客戶端照常放行。
+   - **後續建議**：可再加輕量 **Pairing Token 機制**：Agent 啟動時產生隨機 Token（或由網頁自動配對），握手後首個封包須驗證通過才允許執行 `run` 指令，進一步封鎖同網段其他主機的連線。
+2. **本機 Agent 輸出緩衝限制與 Windows 進程樹清理**：
+   - **已處置 (v1.1)**：改用 `subprocess.Popen` + 背景執行緒雙向泵壓，`stdout`/`stderr` 各自最多保留 `MAX_OUTPUT_BYTES = 256KB`（超出部分仍持續 drain 管道避免死鎖，並回傳 `stdout_truncated` / `stderr_truncated` 旗標）；逾時時 POSIX 走 `os.killpg(os.getpgid(pid), SIGKILL)`、Windows 走 `taskkill /F /T /PID`，並已於 `test_agent.py` 以受控 2 次 fork + 死迴圈驗證無孤兒進程殘留。
+3. **Windows 真正「零依賴」單一執行檔 / 綠色整合包**：
+   - **現況痛點**：目前 `codingpass-agent.zip` 僅約 10KB，但要求學生電腦已安裝 Python 3.8+。
+   - **改善方案**：提供進階版下載選項，將 **Python Embeddable (Windows 內嵌版 ~10MB) + 精簡版 w64devkit (MinGW GCC)** 或透過 `PyInstaller` 封裝為單一 `codingpass-agent.exe`，達成 Windows 學生 100% 免裝 Python、免設環境變數的開箱即用體驗。
+
+### 10.3 伺服器端沙盒隔離升級 (Server-Side Sandbox Hardening)
+1. **檔案系統與網路命名空間隔離 (`bwrap` / `nsjail`)**：
+   - **已處置 (v1.2)**：`Problem.memory_limit_mb` 現在是**實際強制**的 `RLIMIT_AS` 上限（`run_code` / `run_code_batch` 接受 `memory_limit_mb`，由 `_judge_all_cases()` 自題目帶入，並鉗制於 16–8192 MB），因此題目標示、前端徽章與學生實際撞到的限制為同一數字，記憶體錯誤訊息亦改報該題的有效值；全局 `CODE_MEMORY_LIMIT_MB` 仍是未指定時的預設值。
+   - **現況風險**：目前 `backend/compiler.py` 採用 `resource.setrlimit`（限制 CPU、AS 虛擬記憶體、FSIZE、CORE）與 `os.setsid` 進程群組清理。然而受測執行檔仍與 FastAPI 伺服器運行於相同的 Linux 使用者權限與檔案系統視角下——學生若在正式 Submit 的 C++ 程式中撰寫 `std::ifstream("/home/.../backend/codingpass.db")` 或讀取 `.jwt_secret`，仍可能讀取到宿主機有權限訪問的檔案，或發起本地 Socket 連線。
+   - **改善方案**：在 Linux 伺服器上導入輕量級無須 root 權限的 **Bubblewrap (`bwrap`)** 或 **nsjail**：
+     - `--ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64`（僅唯讀掛載必要系統函式庫）
+     - `--tmpfs /tmp`（僅允許在獨立私有 `/tmp` 讀寫）
+     - `--unshare-net --unshare-pid --unshare-ipc`（徹底切斷網路、隔離 PID 樹與 IPC）
+
+### 10.4 教學與考試管理功能補完 (Pedagogy & Exam Features)
+1. **題目 PDF 題面線上檢視器 (`GET /api/problems/{id}/pdf`)**：
+   - **已處置 (v1.2)**：後端已實作 `GET /api/problems/{problem_id}/pdf`（含權限驗證、`os.stat(follow_symlinks=False)` Symlink 穿越防護、以及對學生隱藏伺服器絕對路徑），前端 `ProblemSolver.tsx` 於 `has_statement_pdf` 為真時顯示「📄 題目 PDF」按鈕，點擊即可於新分頁檢視 PDF 題面。
+2. **隨堂測驗／期中考模式 (Exam & Contest Mode)**：
+   - 新增題目／作業的**開放作答時間窗 (`available_from` ~ `due_at`)** 與遲交扣分策略。
+   - 新增**考試防弊開關**：教師可針對特定班級或題目一鍵「暫時關閉 AI 助教診斷」與「啟用提交冷卻時間（如每 15 秒限交 1 次）」。
+3. **教師成績冊與 CSV/Excel 匯出 (Gradebook & Export)**：
+   - **已處置 (v1.2)**：後端已實作 `GET /api/classrooms/{classroom_id}/gradebook.csv`（輸出含 UTF-8 BOM 之學生 × 題目得分矩陣、嘗試次數、總分與平均分，並具備 `_csv_cell` 公式注入轉義防護），前端 `Classrooms.tsx` 已提供教師／管理員一鍵點擊「匯出成績冊 (CSV)」下載。
+4. **題目作答區「自訂測資 (Custom Input)」與標竿對拍**：
+   - 在 `ProblemSolver.tsx` 讓學生除了跑固定範例（Run Samples）外，也能自行輸入測試資料；若該題具備老師匯入的 `ref_code`，還可選擇允許學生輸入自訂測資後由系統背景跑出標竿答案供比對除錯。
+
+### 10.5 前端載入效能與打包瘦身 (Frontend Bundle Optimization)
+1. **Monaco Editor 語法精簡與路由 Code Splitting**：
+   - **已處置 (v1.2)**：`frontend/src/monacoSetup.ts` 已移除整體的 `editor.main.js` 匯入，改為僅載入核心編輯器元件並單獨註冊 `c` 與 `cpp` 語法（`monaco-editor/languages/definitions/cpp/register.js`），徹底剔除 `ts.worker.js` (6.92 MB)、`css.worker.js` (1.07 MB)、`html.worker.js` (743 KB)、`json.worker.js` (433 KB) 與 80 種無關語言，Vite 建置時間由 1.49s 縮短至 **0.75s**。
+
+### 10.6 軟體工程結構與維運 (Architecture & DevOps)
+1. **後端單體檔案模組化拆分 (`backend/main.py`)**：
+   - **現況**：`backend/main.py` 目前已達 **3,800+ 行**，包含所有 Pydantic Schema、權限依賴、評測管線與 20+ 個路由。
+   - **改善方案**：按領域拆分為 `schemas.py`、`services/grading.py` 以及 `routers/`（`auth.py`、`classrooms.py`、`problems.py`、`submissions.py`、`ai.py`、`agent.py`），提升多人與多 Agent 協作時的讀寫效率（同時減少 LLM Context 消耗）。
+2. **容器化一鍵部署 (`Dockerfile` + `docker-compose.yml`)**：
+   - 提供整合 FastAPI、Node.js（供 TeDa 測資引擎使用）、GCC/G++、Bubblewrap 與 Nginx 靜態前端的 `docker-compose.yml`，讓助教在任何新伺服器上一行 `docker compose up -d` 即可完成課堂環境建置。
+
+### 10.7 改善優先級建議路線圖 (Prioritized Action Plan)
+
+| 優先級 | 項目 | 狀態 | 實際效益 |
+|---|---|---|---|
+| **P0 (立即見效)** | `_judge_all_cases` 與 Local Agent 改為「編譯一次、執行多次」 | ✅ **已完成** | 正式 Submit 與本地範例測試多測資批改速度提升 **25~30 倍** |
+| **P0 (安全必備)** | Local Agent `Origin` 白名單 (RFC 1918) + 輸出截斷 + 孤兒 Pipe 防卡死 + `RLIMIT_NPROC` | ✅ **已完成** | 杜絕外部惡意網站透過 WebSocket 觸發本機 RCE、Fork Bomb 與 Pipe 卡死 |
+| **P1 (教學實用)** | 題目 PDF 題面預覽端點 (`GET /api/problems/{id}/pdf`) + 班級成績 CSV 匯出 (`gradebook.csv`) | ✅ **已完成** | 完整發揮庫題卡 PDF 題面價值、支援 Excel 防公式注入之成績冊匯出 |
+| **P1 (前端瘦身)** | Monaco Editor 僅載入 C/C++（剔除 4 個大型 Worker 與 80 種語言） | ✅ **已完成** | 移除 >9 MB 無用 Worker 產物，建置與載入速度翻倍 |
+| **P2 (考試進階)** | 考試時間窗、AI 開關、非同步批改佇列 (SSE) | 📋 待規劃 | 支援 40~100 人正式期中/期末上機考零超時 |
+| **P2 (架構重構)** | `backend/main.py` 路由拆分 + `bwrap` 沙盒隔離 | 📋 待規劃 | 達成競賽級安全隔離與高可維護性模組架構 |
