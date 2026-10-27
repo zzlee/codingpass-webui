@@ -146,4 +146,34 @@ test.describe('CodingPass WebUI E2E Test Suite', () => {
     await page.getByRole('button', { name: '取消' }).click()
     await expect(page.getByText('變更密碼 (Change Password)')).not.toBeVisible()
   })
+
+  test('Teacher live exam proctoring dashboard interaction', async ({ page }) => {
+    await page.goto('/')
+
+    // Sign in as Prof. Chen
+    const accountTrigger = page.locator('button[aria-haspopup="menu"]')
+    await accountTrigger.click()
+    await page.getByRole('menuitem', { name: /Prof\. Chen/ }).click()
+    await expect(accountTrigger).toContainText('Prof. Chen')
+
+    // Navigate to Classrooms
+    await page.getByRole('button', { name: /Classrooms/ }).click()
+
+    // Expand CS101 classroom
+    await page.getByText('C/C++ Programming 101').click()
+
+    // Locate proctoring button (Eye icon)
+    const proctorBtn = page.locator('button[title*="即時監考儀表板"]').first()
+    await expect(proctorBtn).toBeVisible()
+    await proctorBtn.click()
+
+    // Verify Proctoring modal
+    await expect(page.getByText('即時監考儀表板 (Live Exam Proctoring)')).toBeVisible()
+    await expect(page.getByText('應考總人次')).toBeVisible()
+    await expect(page.getByText('即時連線中')).toBeVisible()
+
+    // Close modal
+    await page.getByRole('button', { name: '關閉' }).click()
+    await expect(page.getByText('即時監考儀表板 (Live Exam Proctoring)')).not.toBeVisible()
+  })
 })

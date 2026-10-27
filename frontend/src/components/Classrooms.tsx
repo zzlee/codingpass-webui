@@ -14,6 +14,7 @@ import {
   ClipboardList,
   Copy,
   Download,
+  Eye,
   Hash,
   GraduationCap,
   Plus,
@@ -25,6 +26,7 @@ import {
 
 import SectionHeading from './SectionHeading'
 import PlagiarismModal from './PlagiarismModal'
+import ExamProctorModal from './ExamProctorModal'
 import { DifficultyBadge, EmptyState, ErrorNotice, Field, LoadingRow, MetaChip, Modal, Spinner } from './ui'
 import { useAuth } from '../authContext'
 import api, { ApiError, saveBlob } from '../api'
@@ -58,6 +60,7 @@ function ClassroomCard({
   const [exporting, setExporting] = useState(false)
   const [exportError, setExportError] = useState<string | null>(null)
   const [auditProblem, setAuditProblem] = useState<{ id: number; title: string } | null>(null)
+  const [proctorProblem, setProctorProblem] = useState<{ id: number; title: string } | null>(null)
 
   const toggle = async () => {
     const next = !open
@@ -252,17 +255,30 @@ function ClassroomCard({
                           </span>
                         </button>
                         {canManage ? (
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              setAuditProblem({ id: problem.id, title: problem.title })
-                            }}
-                            title="查重審查 (Plagiarism Screen)"
-                            className="p-1.5 rounded-lg border border-slate-800 hover:border-rose-500/40 hover:bg-rose-500/10 text-slate-400 hover:text-rose-300 transition shrink-0"
-                          >
-                            <ShieldAlert className="w-3.5 h-3.5" />
-                          </button>
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                setProctorProblem({ id: problem.id, title: problem.title })
+                              }}
+                              title="即時監考儀表板 (Live Exam Proctoring)"
+                              className="p-1.5 rounded-lg border border-slate-800 hover:border-amber-500/40 hover:bg-amber-500/10 text-slate-400 hover:text-amber-300 transition"
+                            >
+                              <Eye className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                setAuditProblem({ id: problem.id, title: problem.title })
+                              }}
+                              title="查重審查 (Plagiarism Screen)"
+                              className="p-1.5 rounded-lg border border-slate-800 hover:border-rose-500/40 hover:bg-rose-500/10 text-slate-400 hover:text-rose-300 transition"
+                            >
+                              <ShieldAlert className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
                         ) : null}
                       </li>
                     ))}
@@ -280,6 +296,14 @@ function ClassroomCard({
               classroomName={classroom.name}
               problemId={auditProblem.id}
               problemTitle={auditProblem.title}
+            />
+          ) : null}
+
+          {proctorProblem ? (
+            <ExamProctorModal
+              open={Boolean(proctorProblem)}
+              onClose={() => setProctorProblem(null)}
+              problemId={proctorProblem.id}
             />
           ) : null}
         </div>

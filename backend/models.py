@@ -338,6 +338,13 @@ class Problem(Base):
         String(255), nullable=True, default=None
     )
 
+    #: Exam mode flag: when true, problem solver triggers full-screen lockdown.
+    is_exam: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    #: Whether Windows Local Agent Kiosk lock is strictly required.
+    exam_lock_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    #: Max allowed window blur/switching events before flagging or termination.
+    max_blur_count: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=utcnow, index=True
     )
@@ -351,6 +358,9 @@ class Problem(Base):
         order_by="TestCase.id",
     )
     submissions: Mapped[list["Submission"]] = relationship(
+        back_populates="problem", cascade="all, delete-orphan", passive_deletes=True
+    )
+    exam_sessions: Mapped[list["ExamSession"]] = relationship(
         back_populates="problem", cascade="all, delete-orphan", passive_deletes=True
     )
 
@@ -582,6 +592,57 @@ class Submission(Base):
         )
 
 
+# --------------------------------------------------------------------------- #
+# Exam Sessions & Anti-cheat Tracking
+# --------------------------------------------------------------------------- #
+
+
+class ExamSession(Base):
+    """An active or completed student exam session with lock tracking."""
+
+    __tablename__ = "exam_sessions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    problem_id: Mapped[int] = mapped_column(
+        ForeignKey("problems.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    student_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    start_time: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=utcnow, index=True
+    )
+    end_time: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    # Telemetry and lock state
+    blur_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    fullscreen_exited_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: Highest cumulative count of blocked key combinations reported by the
+    #: Local Agent hook (reported through heartbeats, monotonic).
+    agent_blocked_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    agent_lock_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    last_heartbeat: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+
+    #: "in_progress", "submitted", "terminated"
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="in_progress", index=True
+    )
+    violation_log: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+
+    problem: Mapped["Problem"] = relationship(back_populates="exam_sessions")
+    student: Mapped["User"] = relationship()
+
+    __table_args__ = (
+        Index("ix_exam_problem_student", "problem_id", "student_id"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<ExamSession id={self.id} problem_id={self.problem_id} "
+            f"student_id={self.student_id} status={self.status} blur={self.blur_count}>"
+        )
+
+
 ALL_MODELS: tuple[type, ...] = (
     User,
     Classroom,
@@ -589,4 +650,5 @@ ALL_MODELS: tuple[type, ...] = (
     Problem,
     TestCase,
     Submission,
+    ExamSession,
 )

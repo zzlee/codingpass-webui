@@ -118,6 +118,7 @@ try:
     from .routers.run import router as run_router
     from .routers.submissions import router as submissions_router
     from .routers.users import router as users_router
+    from .routers.exams import router as exams_router
     from .schemas import (
         AIAnalyzeRequest,
         AIAnalyzeResponse,
@@ -285,6 +286,7 @@ except ImportError:
     from routers.run import router as run_router  # type: ignore[no-redef]
     from routers.submissions import router as submissions_router  # type: ignore[no-redef]
     from routers.users import router as users_router  # type: ignore[no-redef]
+    from routers.exams import router as exams_router  # type: ignore[no-redef]
     from schemas import (  # type: ignore[no-redef]
         AIAnalyzeRequest,
         AIAnalyzeResponse,
@@ -487,6 +489,7 @@ app.include_router(auth_router)
 app.include_router(users_router)
 app.include_router(classrooms_router)
 app.include_router(problems_router)
+app.include_router(exams_router)
 app.include_router(submissions_router)
 app.include_router(ai_router)
 

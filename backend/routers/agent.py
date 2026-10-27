@@ -29,7 +29,7 @@ async def download_agent_package():
     agent_dir = Path(__file__).resolve().parent.parent.parent / "local_agent"
     members = [
         (agent_dir / name, name)
-        for name in ("agent.py", "run_agent.sh", "run_agent.bat", "README.md")
+        for name in ("agent.py", "exam_lock.py", "run_agent.sh", "run_agent.bat", "README.md")
         if (agent_dir / name).is_file()
     ]
     if not any(name == "agent.py" for _, name in members):

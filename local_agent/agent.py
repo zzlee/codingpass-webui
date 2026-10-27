@@ -58,10 +58,18 @@ import urllib.parse
 from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
+try:
+    from exam_lock import ExamLock, launch_edge_kiosk, is_supported_platform
+except ImportError:
+    from .exam_lock import ExamLock, launch_edge_kiosk, is_supported_platform  # type: ignore[no-redef]
+
 HOST = os.environ.get("CODINGPASS_AGENT_HOST", "127.0.0.1")
 PORT = int(os.environ.get("CODINGPASS_AGENT_PORT", "8765"))
 VERSION = "1.0.0"
 WS_MAGIC_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+# Active exam lock singleton across connections
+_GLOBAL_EXAM_LOCK: Optional[ExamLock] = None
 
 # ---------------------------------------------------------------------------
 # Hardening limits
@@ -1130,6 +1138,96 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
                 await ws.send_text(
                     json.dumps({"type": "batch_result", "id": req_id, **batch_res})
+                )
+
+            elif msg_type == "start_exam_lock":
+                global _GLOBAL_EXAM_LOCK
+                req_id = data.get("id")
+                timeout_sec = float(data.get("timeout_sec", 120.0))
+                ticket = data.get("ticket") or data.get("token")
+                if _GLOBAL_EXAM_LOCK is None or not _GLOBAL_EXAM_LOCK.active:
+                    _GLOBAL_EXAM_LOCK = ExamLock(heartbeat_timeout_sec=timeout_sec)
+                    ok = _GLOBAL_EXAM_LOCK.lock()
+                else:
+                    _GLOBAL_EXAM_LOCK.heartbeat()
+                    ok = True
+
+                await ws.send_text(
+                    json.dumps(
+                        {
+                            "type": "exam_lock_started",
+                            "id": req_id,
+                            "locked": bool(_GLOBAL_EXAM_LOCK and _GLOBAL_EXAM_LOCK.active),
+                            "simulated": bool(_GLOBAL_EXAM_LOCK and _GLOBAL_EXAM_LOCK.simulated),
+                            "is_windows": is_supported_platform(),
+                            "token": str(ticket or "local-agent-lock-active"),
+                            "success": ok,
+                        }
+                    )
+                )
+
+            elif msg_type == "heartbeat_exam_lock":
+                req_id = data.get("id")
+                if _GLOBAL_EXAM_LOCK is not None and _GLOBAL_EXAM_LOCK.active:
+                    _GLOBAL_EXAM_LOCK.heartbeat()
+                    locked = True
+                else:
+                    locked = False
+
+                await ws.send_text(
+                    json.dumps(
+                        {
+                            "type": "exam_lock_heartbeat_ack",
+                            "id": req_id,
+                            "locked": locked,
+                        }
+                    )
+                )
+
+            elif msg_type == "query_exam_lock":
+                req_id = data.get("id")
+                await ws.send_text(
+                    json.dumps(
+                        {
+                            "type": "exam_lock_status",
+                            "id": req_id,
+                            "locked": bool(_GLOBAL_EXAM_LOCK and _GLOBAL_EXAM_LOCK.active),
+                            "simulated": bool(_GLOBAL_EXAM_LOCK and _GLOBAL_EXAM_LOCK.simulated),
+                            "is_windows": is_supported_platform(),
+                            "blocked_count": _GLOBAL_EXAM_LOCK.blocked_count if _GLOBAL_EXAM_LOCK else 0,
+                        }
+                    )
+                )
+
+            elif msg_type == "release_exam_lock":
+                req_id = data.get("id")
+                if _GLOBAL_EXAM_LOCK is not None:
+                    _GLOBAL_EXAM_LOCK.unlock()
+                    _GLOBAL_EXAM_LOCK = None
+
+                await ws.send_text(
+                    json.dumps(
+                        {
+                            "type": "exam_lock_released",
+                            "id": req_id,
+                            "locked": False,
+                        }
+                    )
+                )
+
+            elif msg_type == "launch_kiosk":
+                req_id = data.get("id")
+                url = str(data.get("url", ""))
+                proc = launch_edge_kiosk(url)
+                await ws.send_text(
+                    json.dumps(
+                        {
+                            "type": "kiosk_launched",
+                            "id": req_id,
+                            "pid": proc.pid if proc else None,
+                            "supported": is_supported_platform(),
+                        }
+                    )
                 )
 
             else:

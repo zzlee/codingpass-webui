@@ -17,6 +17,10 @@ import type {
   Classroom,
   ClassroomDetail,
   Difficulty,
+  ExamHeartbeatRequest,
+  ExamHeartbeatResponse,
+  ExamMonitorResponse,
+  ExamSession,
   HealthResponse,
   PasswordChangePayload,
   PlagiarismReport,
@@ -473,6 +477,22 @@ export const api = {
   /** Teacher/admin manual score + feedback override for one attempt. */
   teacherReviewSubmission: (id: number, payload: TeacherReviewRequest) =>
     request<SubmissionDetail>(`/submissions/${id}/review`, { method: 'PATCH', body: payload }),
+
+  // -- exams & proctoring -----------------------------------------------
+  getExamTicket: (problemId: number) =>
+    request<{ problem_id: number; student_id: number; ticket: string }>(`/exams/${problemId}/ticket`, { method: 'POST' }),
+
+  startExamSession: (problemId: number, payload: { agent_lock_token?: string } = {}) =>
+    request<ExamSession>(`/exams/${problemId}/start`, { method: 'POST', body: payload }),
+
+  examHeartbeat: (sessionId: number, payload: ExamHeartbeatRequest) =>
+    request<ExamHeartbeatResponse>(`/exams/${sessionId}/heartbeat`, { method: 'POST', body: payload }),
+
+  getExamMonitor: (problemId: number) =>
+    request<ExamMonitorResponse>(`/exams/${problemId}/monitor`),
+
+  forceSubmitExam: (sessionId: number) =>
+    request<{ message: string }>(`/exams/${sessionId}/force-submit`, { method: 'POST' }),
 
   health: () => request<HealthResponse>('/health', { auth: false }),
 }

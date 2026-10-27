@@ -455,6 +455,9 @@ class ProblemCreate(BaseModel):
         default=None,
         description="Omit to keep the problem in your private bank.",
     )
+    is_exam: bool = Field(default=False, description="Flag problem as examination mode.")
+    exam_lock_required: bool = Field(default=False, description="Require local agent lock.")
+    max_blur_count: int = Field(default=3, ge=0, le=100, description="Max allowed window blurs.")
     starter_code_c: Optional[str] = Field(default=None, max_length=MAX_SOURCE_CHARS)
     starter_code_cpp: Optional[str] = Field(default=None, max_length=MAX_SOURCE_CHARS)
     test_cases: list[TestCaseIn] = Field(
@@ -491,6 +494,9 @@ class ProblemSummary(BaseModel):
     has_wording_rules: bool = False
     has_random_generator: bool = False
     has_statement_pdf: bool = False
+    is_exam: bool = False
+    exam_lock_required: bool = False
+    max_blur_count: int = 3
 
 
 # Complete schema rebuild for circular model reference
@@ -822,3 +828,97 @@ class TeacherReviewRequest(BaseModel):
 
     teacher_score: Optional[float] = Field(default=None, ge=0.0, le=100.0)
     teacher_feedback: Optional[str] = Field(default=None, max_length=10000)
+
+
+# --------------------------------------------------------------------------- #
+# Exam Lockdown & Anti-Cheat Schemas
+# --------------------------------------------------------------------------- #
+
+
+class ExamSessionStartRequest(BaseModel):
+    """Body of ``POST /api/exams/{problem_id}/start``."""
+
+    agent_lock_token: Optional[str] = Field(
+        default=None, description="Verification token from CodingPass Local Agent."
+    )
+
+
+class ExamHeartbeatRequest(BaseModel):
+    """Body of ``POST /api/exams/{session_id}/heartbeat``.
+
+    Every telemetry field is deliberately range-constrained: a tampered
+    client must not be able to inflate counters with a single giant
+    increment, nor smuggle an oversized blob through the violation label.
+    """
+
+    is_fullscreen: bool
+    blur_increment: int = Field(
+        default=0,
+        ge=0,
+        le=10,
+        description="Window-blur events observed since the previous beat (max 10).",
+    )
+    fullscreen_exited_increment: int = Field(
+        default=0,
+        ge=0,
+        le=10,
+        description="Fullscreen-exit events since the previous beat (max 10). "
+        "Legacy clients may omit it; the server then infers 1 from "
+        "``is_fullscreen == False``.",
+    )
+    agent_locked: bool = Field(
+        default=False,
+        description="Local Agent reports its keyboard hook currently engaged.",
+    )
+    agent_blocked_count: int = Field(
+        default=0,
+        ge=0,
+        le=1_000_000_000,
+        description="Cumulative blocked key-combination count from the Local Agent hook.",
+    )
+    violation_event: Optional[str] = Field(
+        default=None, max_length=64, description="Short violation label, e.g. 'ALT_TAB_SWITCH'."
+    )
+
+
+class ExamHeartbeatResponse(BaseModel):
+    """Response to ``POST /api/exams/{session_id}/heartbeat``."""
+
+    status: str
+    blur_count: int
+    max_blur_count: int
+    fullscreen_exited_count: int
+    agent_lock_verified: bool
+    warning: Optional[str] = None
+
+
+class ExamSessionOut(BaseModel):
+    """Detailed exam session state."""
+
+    id: int
+    problem_id: int
+    problem_title: str
+    student_id: int
+    student_username: str
+    student_name: str
+    start_time: UtcDatetime
+    end_time: Optional[UtcDatetime] = None
+    blur_count: int
+    fullscreen_exited_count: int
+    agent_blocked_count: int = 0
+    agent_lock_verified: bool
+    last_heartbeat: UtcDatetime
+    status: str
+    violations: list[dict] = Field(default_factory=list)
+
+
+class ExamMonitorResponse(BaseModel):
+    """Classroom or problem live proctoring overview."""
+
+    problem_id: int
+    problem_title: str
+    is_exam: bool
+    exam_lock_required: bool
+    max_blur_count: int
+    active_students: int
+    sessions: list[ExamSessionOut]

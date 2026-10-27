@@ -138,6 +138,7 @@ def init_db() -> None:
     metadata.create_all(bind=engine)
     _ensure_submission_columns(engine)
     _ensure_problem_columns(engine)
+    _ensure_exam_columns(engine)
     logger.info("database ready at %s", _safe_url(DATABASE_URL))
     try:
         seed_default_data()
@@ -185,6 +186,13 @@ PROBLEM_MIGRATIONS: tuple[tuple[str, str], ...] = (
 )
 
 
+#: Exam-telemetry columns added after the first release. ``NOT NULL`` columns
+#: carry a SQL ``DEFAULT`` so SQLite can backfill existing rows in place.
+EXAM_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("agent_blocked_count", "INTEGER DEFAULT 0"),
+)
+
+
 def _ensure_columns(
     engine: Engine, table: str, migrations: tuple[tuple[str, str], ...]
 ) -> None:
@@ -222,6 +230,11 @@ def _ensure_columns(
 def _ensure_submission_columns(engine: Engine) -> None:
     """Add missing Phase 4 columns to an existing SQLite ``submissions`` table."""
     _ensure_columns(engine, "submissions", SUBMISSION_MIGRATIONS)
+
+
+def _ensure_exam_columns(engine: Engine) -> None:
+    """Add missing anti-cheat telemetry columns to ``exam_sessions``."""
+    _ensure_columns(engine, "exam_sessions", EXAM_MIGRATIONS)
 
 
 def _ensure_problem_columns(engine: Engine) -> None:

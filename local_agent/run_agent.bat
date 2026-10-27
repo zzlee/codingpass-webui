@@ -29,10 +29,10 @@ if %errorlevel% neq 0 (
         pause
         exit /b 1
     ) else (
-        py -3 agent.py
+        py -3 agent.py %*
     )
 ) else (
-    python agent.py
+    python agent.py %*
 )
 
 pause

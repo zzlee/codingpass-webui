@@ -27,9 +27,13 @@ export interface LocalAgentContextValue {
   status: AgentStatus
   compilerInfo: string | null
   agentVersion: string | null
+  examLocked: boolean
   runLocally: (payload: LocalRunPayload) => Promise<RunResponse>
   runBatchLocally: (payload: LocalBatchRunPayload) => Promise<RunResponse[]>
   checkConnection: () => void
+  startExamLock: (ticket?: string, timeoutSec?: number) => Promise<{ locked: boolean; token: string; is_windows: boolean }>
+  releaseExamLock: () => Promise<void>
+  heartbeatExamLock: () => Promise<boolean>
 }
 
 const LocalAgentContext = createContext<LocalAgentContextValue | null>(null)
@@ -181,11 +185,18 @@ type PendingRequest =
       resolve: (results: RunResponse[]) => void
       reject: (error: Error) => void
     }
+  | {
+      kind: 'exam'
+      timer: number
+      resolve: (data: any) => void
+      reject: (error: Error) => void
+    }
 
 export function LocalAgentProvider({ children }: { children: React.ReactNode }) {
   const [status, setStatus] = useState<AgentStatus>('disconnected')
   const [compilerInfo, setCompilerInfo] = useState<string | null>(null)
   const [agentVersion, setAgentVersion] = useState<string | null>(null)
+  const [examLocked, setExamLocked] = useState<boolean>(false)
 
   const wsRef = useRef<WebSocket | null>(null)
   const pendingRequests = useRef<Map<string, PendingRequest>>(new Map())
@@ -255,6 +266,20 @@ export function LocalAgentProvider({ children }: { children: React.ReactNode }) 
               }
             })
           }
+        } else if (
+          type === 'exam_lock_started' ||
+          type === 'exam_lock_status' ||
+          type === 'exam_lock_released' ||
+          type === 'exam_lock_heartbeat_ack'
+        ) {
+          if (type === 'exam_lock_started' || type === 'exam_lock_status') {
+            setExamLocked(Boolean(data.locked))
+          } else if (type === 'exam_lock_released') {
+            setExamLocked(false)
+          }
+          settle(reqId, (pending) => {
+            if (pending.kind === 'exam') pending.resolve(data)
+          })
         } else if (type === 'error') {
           // The agent rejects a malformed request (e.g. a non-array stdin_list)
           // with this frame; without the reject the caller would sit on its
@@ -274,6 +299,7 @@ export function LocalAgentProvider({ children }: { children: React.ReactNode }) 
       ws.onclose = () => {
         setStatus('disconnected')
         setCompilerInfo(null)
+        setExamLocked(false)
         wsRef.current = null
 
         // Reject any pending local executions with fallback prompt
@@ -411,15 +437,91 @@ export function LocalAgentProvider({ children }: { children: React.ReactNode }) 
     })
   }
 
+  const startExamLock = (ticket?: string, timeoutSec = 120): Promise<{ locked: boolean; token: string; is_windows: boolean }> => {
+    const ws = openSocket()
+    if (!ws) return Promise.reject(new Error('Local Agent is not connected.'))
+    const reqId = nextRequestId()
+    return new Promise((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        if (pendingRequests.current.delete(reqId)) {
+          reject(new Error('Agent lock request timed out.'))
+        }
+      }, 5000)
+      pendingRequests.current.set(reqId, {
+        kind: 'exam',
+        timer,
+        resolve: (data) => resolve({
+          locked: Boolean(data.locked),
+          token: String(data.token || ''),
+          is_windows: Boolean(data.is_windows),
+        }),
+        reject,
+      })
+      ws.send(JSON.stringify({ type: 'start_exam_lock', id: reqId, timeout_sec: timeoutSec, ticket }))
+    })
+  }
+
+  const releaseExamLock = (): Promise<void> => {
+    const ws = openSocket()
+    if (!ws) {
+      setExamLocked(false)
+      return Promise.resolve()
+    }
+    const reqId = nextRequestId()
+    return new Promise((resolve) => {
+      const timer = window.setTimeout(() => {
+        pendingRequests.current.delete(reqId)
+        setExamLocked(false)
+        resolve()
+      }, 3000)
+      pendingRequests.current.set(reqId, {
+        kind: 'exam',
+        timer,
+        resolve: () => {
+          setExamLocked(false)
+          resolve()
+        },
+        reject: () => {
+          setExamLocked(false)
+          resolve()
+        },
+      })
+      ws.send(JSON.stringify({ type: 'release_exam_lock', id: reqId }))
+    })
+  }
+
+  const heartbeatExamLock = (): Promise<boolean> => {
+    const ws = openSocket()
+    if (!ws) return Promise.resolve(false)
+    const reqId = nextRequestId()
+    return new Promise((resolve) => {
+      const timer = window.setTimeout(() => {
+        pendingRequests.current.delete(reqId)
+        resolve(false)
+      }, 3000)
+      pendingRequests.current.set(reqId, {
+        kind: 'exam',
+        timer,
+        resolve: (data) => resolve(Boolean(data.locked)),
+        reject: () => resolve(false),
+      })
+      ws.send(JSON.stringify({ type: 'heartbeat_exam_lock', id: reqId }))
+    })
+  }
+
   return (
     <LocalAgentContext.Provider
       value={{
         status,
         compilerInfo,
         agentVersion,
+        examLocked,
         runLocally,
         runBatchLocally,
         checkConnection: connect,
+        startExamLock,
+        releaseExamLock,
+        heartbeatExamLock,
       }}
     >
       {children}

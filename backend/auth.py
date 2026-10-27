@@ -27,6 +27,8 @@ Configuration (environment)
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 import os
 import secrets
@@ -63,7 +65,9 @@ __all__ = [
     "require_admin",
     "require_student",
     "require_teacher",
+    "exam_agent_token",
     "token_subject_id",
+    "verify_exam_agent_token",
     "verify_password",
     "verify_password_for_login",
 ]
@@ -215,6 +219,32 @@ class ExpiredTokenError(TokenError):
 
     def __init__(self) -> None:
         super().__init__("token expired")
+
+
+def exam_agent_token(student_id: int, problem_id: int) -> str:
+    """HMAC-SHA256 proof that the Local Agent keyboard lockdown is engaged.
+
+    The token is bound to the exact ``(student_id, problem_id)`` pair and
+    derived with HMAC-SHA256 (``hashlib.sha256`` digest) over the server
+    ``SECRET_KEY``, so it cannot be guessed offline, forged from the browser,
+    or replayed for a different student/problem.  The trusted Local Agent
+    channel surfaces this value and the client replays it to
+    ``POST /api/exams/{problem_id}/start``; verification happens in
+    :func:`verify_exam_agent_token`.
+    """
+    message = f"codingpass:exam-lock:v1:{int(student_id)}:{int(problem_id)}".encode("utf-8")
+    return hmac.new(SECRET_KEY.encode("utf-8"), message, hashlib.sha256).hexdigest()
+
+
+def verify_exam_agent_token(token: Optional[str], student_id: int, problem_id: int) -> bool:
+    """Constant-time check of an agent lock token against the expected HMAC."""
+    if not token:
+        return False
+    expected = exam_agent_token(student_id, problem_id)
+    candidate = token.strip()
+    if len(candidate) != len(expected):
+        return False
+    return hmac.compare_digest(candidate, expected)
 
 
 def create_access_token(

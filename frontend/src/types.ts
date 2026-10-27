@@ -237,6 +237,9 @@ export interface ProblemSummary {
   has_random_generator?: boolean
   has_statement_pdf?: boolean
   pdf_path?: string | null
+  is_exam?: boolean
+  exam_lock_required?: boolean
+  max_blur_count?: number
 }
 
 /** `ProblemDetail` - `GET /api/problems/{id}` (samples only for students). */
@@ -498,3 +501,55 @@ export interface PlagiarismReport {
 
 /** Tabs of the application shell. */
 export type AppTab = 'playground' | 'problems' | 'classrooms' | 'submissions'
+
+/* -------------------------------------------------------------------------- */
+/* Exam & Anti-Cheat Telemetry                                                 */
+/* -------------------------------------------------------------------------- */
+
+export interface ExamViolation {
+  event: string
+  timestamp: string
+}
+
+export interface ExamSession {
+  id: number
+  problem_id: number
+  problem_title: string
+  student_id: number
+  student_username: string
+  student_name: string
+  start_time: string
+  end_time?: string | null
+  blur_count: number
+  fullscreen_exited_count: number
+  agent_lock_verified: boolean
+  last_heartbeat: string
+  status: 'in_progress' | 'submitted' | 'terminated'
+  violations: ExamViolation[]
+}
+
+export interface ExamHeartbeatRequest {
+  is_fullscreen: boolean
+  blur_increment?: number
+  agent_locked?: boolean
+  violation_event?: string
+}
+
+export interface ExamHeartbeatResponse {
+  status: string
+  blur_count: number
+  max_blur_count: number
+  fullscreen_exited_count: number
+  agent_lock_verified: boolean
+  warning?: string | null
+}
+
+export interface ExamMonitorResponse {
+  problem_id: number
+  problem_title: string
+  is_exam: boolean
+  exam_lock_required: boolean
+  max_blur_count: number
+  active_students: number
+  sessions: ExamSession[]
+}

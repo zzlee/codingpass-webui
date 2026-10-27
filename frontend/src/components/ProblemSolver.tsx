@@ -36,6 +36,7 @@ import {
 import '../monacoSetup'
 import { EDITOR_OPTIONS, EDITOR_THEME } from '../monacoSetup'
 import AITutorPanel from './AITutorPanel'
+import ExamLockdownOverlay from './ExamLockdownOverlay'
 import Markdown from './Markdown'
 import ResultPanel from './ResultPanel'
 import { CopyButton, DifficultyBadge, EmptyState, ErrorNotice, MetaChip, Segmented, Spinner } from './ui'
@@ -432,6 +433,11 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
           <MetaChip icon={<EyeOff className="h-3 w-3" aria-hidden="true" />}>
             {problem.hidden_count} hidden
           </MetaChip>
+          {problem.is_exam ? (
+            <span className="rounded-full border border-rose-500/40 bg-rose-500/15 px-2 py-0.5 font-mono text-[10px] font-semibold text-rose-300">
+              🔒 考試模式
+            </span>
+          ) : null}
           {problem.has_statement_pdf ? (
             <button
               type="button"
@@ -458,7 +464,16 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
 
       <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-3 lg:flex-row lg:gap-4 lg:overflow-hidden lg:p-4">
         {/* Statement --------------------------------------------------- */}
-        <section className="flex min-h-[18rem] flex-col overflow-hidden rounded-xl border border-slate-800 bg-slate-900/40 lg:min-h-0 lg:basis-[42%]">
+        <section
+          onCopy={(e) => {
+            if (problem.is_exam) {
+              e.preventDefault()
+            }
+          }}
+          className={`flex min-h-[18rem] flex-col overflow-hidden rounded-xl border border-slate-800 bg-slate-900/40 lg:min-h-0 lg:basis-[42%] ${
+            problem.is_exam ? 'select-none' : ''
+          }`}
+        >
           <div className="flex shrink-0 items-center gap-2 border-b border-slate-800/80 bg-slate-900/70 px-3 py-2">
             <BookOpen className="h-4 w-4 text-sky-400" aria-hidden="true" />
             <span className="text-xs font-semibold text-slate-300">Problem statement</span>
@@ -633,16 +648,27 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
           </div>
 
           {/* AI tutor ---------------------------------------------------- */}
-          <AITutorPanel
-            code={code}
-            language={language}
-            status={report?.verdict}
-            compileOutput={report?.compileOutput}
-            problemId={problem.id}
-            compact
-          />
+          {problem.is_exam ? (
+            <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-3 text-center text-xs text-slate-400">
+              <span className="font-semibold text-rose-300">🔒 學生考試模式已啟動</span>
+              <p className="mt-1 text-[11px] text-slate-500">考場環境已停用 AI Tutor 即時解析與提示功能。</p>
+            </div>
+          ) : (
+            <AITutorPanel
+              code={code}
+              language={language}
+              status={report?.verdict}
+              compileOutput={report?.compileOutput}
+              problemId={problem.id}
+              compact
+            />
+          )}
         </section>
       </div>
+
+      {problem.is_exam && user?.role === 'student' ? (
+        <ExamLockdownOverlay problem={problem} onForceSubmitted={onBack} />
+      ) : null}
     </div>
   )
 }
