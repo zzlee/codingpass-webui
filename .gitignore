@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+backend/venv/
+*.egg-info/
+.pytest_cache/
+
+# Node / Frontend
+node_modules/
+frontend/node_modules/
+dist/
+frontend/dist/
+*.local
+
+# Logs and Temp
+*.log
+/tmp/cj-*
+.system_generated/
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
