@@ -12,6 +12,7 @@ import {
   ChartColumn,
   Clock,
   Filter,
+  Gavel,
   RefreshCw,
   School,
   Trophy,
@@ -19,6 +20,7 @@ import {
 } from 'lucide-react'
 
 import SectionHeading from './SectionHeading'
+import SubmissionReviewModal from './SubmissionReviewModal'
 import { EmptyState, ErrorNotice, LoadingRow, Spinner, VerdictBadge } from './ui'
 import { useAuth } from '../authContext'
 import api from '../api'
@@ -50,6 +52,8 @@ export function Submissions() {
   )
   const [loadingMore, setLoadingMore] = useState(false)
   const [moreError, setMoreError] = useState<string | null>(null)
+  /** Id of the attempt opened in the Phase 4 review modal, or `null`. */
+  const [reviewId, setReviewId] = useState<number | null>(null)
 
   const query = useMemo(
     () => ({
@@ -212,7 +216,7 @@ export function Submissions() {
           />
         ) : (
           <div className="overflow-hidden rounded-xl border border-slate-800">
-            <table className="w-full min-w-[46rem] border-collapse text-left text-xs">
+            <table className="w-full min-w-[54rem] border-collapse text-left text-xs">
               <thead>
                 <tr className="bg-slate-900/80 text-[10px] uppercase tracking-wider text-slate-500">
                   <th className="px-3 py-2 font-semibold">Problem</th>
@@ -223,11 +227,26 @@ export function Submissions() {
                   <th className="px-3 py-2 text-right font-semibold">Passed</th>
                   <th className="px-3 py-2 text-right font-semibold">Time</th>
                   <th className="px-3 py-2 text-right font-semibold">When</th>
+                  <th className="px-3 py-2 font-semibold">AI / Review</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800">
-                {rows.map((row) => (
-                  <tr key={row.id} className="bg-slate-900/30 transition-colors hover:bg-slate-900/70">
+                {rows.map((row) => {
+                  const teacherScore =
+                    row.teacher_score === null || row.teacher_score === undefined
+                      ? null
+                      : row.teacher_score
+                  const aiScore =
+                    row.ai_suggested_score === null || row.ai_suggested_score === undefined
+                      ? null
+                      : row.ai_suggested_score
+                  return (
+                    <tr
+                      key={row.id}
+                      onClick={() => setReviewId(row.id)}
+                      title="Open the AI / teacher review panel"
+                      className="cursor-pointer bg-slate-900/30 transition-colors hover:bg-slate-900/70"
+                    >
                     <td className="max-w-[16rem] px-3 py-2">
                       <span className="block truncate font-semibold text-slate-200">
                         {row.problem_title || `Problem #${row.problem_id}`}
@@ -272,8 +291,38 @@ export function Submissions() {
                     <td className="px-3 py-2 text-right font-mono text-[11px] text-slate-500">
                       {formatTimestamp(row.created_at)}
                     </td>
-                  </tr>
-                ))}
+                    <td className="px-3 py-2">
+                      <span className="flex flex-wrap items-center gap-1">
+                        {teacherScore !== null ? (
+                          <span className="rounded border border-sky-500/40 bg-sky-500/10 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-sky-300">
+                            Teacher: {formatScore(teacherScore)}
+                          </span>
+                        ) : null}
+                        {aiScore !== null ? (
+                          <span className="rounded border border-violet-500/40 bg-violet-500/10 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-violet-300">
+                            AI: {formatScore(aiScore)}
+                          </span>
+                        ) : null}
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            setReviewId(row.id)
+                          }}
+                          title="Open the full review panel for this attempt"
+                          className={buttonClass('ghost', 'ml-auto px-2 py-1 text-[10px]')}
+                        >
+                          <Gavel className="h-3 w-3" aria-hidden="true" />
+                          Review
+                        </button>
+                        {teacherScore === null && aiScore === null ? (
+                          <span className="font-mono text-[10px] text-slate-600">not reviewed</span>
+                        ) : null}
+                      </span>
+                    </td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           </div>
@@ -302,6 +351,17 @@ export function Submissions() {
           </p>
         ) : null}
       </div>
+
+      {/* Phase 4 review modal ------------------------------------------ */}
+      {reviewId !== null ? (
+        <SubmissionReviewModal
+          key={reviewId}
+          submissionId={reviewId}
+          staff={staff}
+          onClose={() => setReviewId(null)}
+          onReviewed={() => list.reload()}
+        />
+      ) : null}
     </div>
   )
 }

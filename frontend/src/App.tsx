@@ -16,6 +16,7 @@ import { useCallback, useState } from 'react'
 
 import AuthProvider, { useAuth } from './authContext'
 import WorkspaceProvider from './workspaceContext'
+import { LocalAgentProvider } from './localAgentContext'
 import Header from './components/Header'
 import Playground from './components/Playground'
 import ProblemBank from './components/ProblemBank'
@@ -107,7 +108,9 @@ export default function App() {
   return (
     <AuthProvider>
       <WorkspaceProvider>
-        <Shell />
+        <LocalAgentProvider>
+          <Shell />
+        </LocalAgentProvider>
       </WorkspaceProvider>
     </AuthProvider>
   )

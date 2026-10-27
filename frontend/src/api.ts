@@ -11,18 +11,26 @@
  * of leaving a stale token in every panel.
  */
 import type {
+  AIAnalyzeRequest,
+  AIAnalyzeResponse,
+  AIStatusResponse,
   Classroom,
   ClassroomDetail,
   Difficulty,
   HealthResponse,
+  PlagiarismReport,
   ProblemCreateRequest,
   ProblemDetail,
+  ProblemImportResult,
   ProblemListResponse,
   RegisterRequest,
   RunRequest,
   RunResponse,
+  SubmissionAIReviewResponse,
+  SubmissionDetail,
   SubmissionListResponse,
   SubmissionResult,
+  TeacherReviewRequest,
   TestCaseDraft,
   TokenResponse,
   User,
@@ -289,6 +297,32 @@ export const api = {
   addTestCase: (problemId: number, payload: TestCaseDraft) =>
     request<ProblemDetail>(`/problems/${problemId}/testcases`, { method: 'POST', body: payload }),
 
+  importPack: (payload: { directory_path: string; classroom_id?: number | null; generate_hidden?: boolean; num_random?: number }) =>
+    request<ProblemImportResult>('/problems/import-pack', { method: 'POST', body: payload }),
+
+  importPackFile: (formData: FormData) => {
+    const token = readStoredToken()
+    return fetch('/api/problems/import-pack', {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: formData,
+    }).then(async (res) => {
+      if (!res.ok) {
+        const text = await res.text()
+        let detail = text
+        try {
+          const parsed = JSON.parse(text)
+          detail = parsed.detail || text
+        } catch { /* empty */ }
+        throw new ApiError(res.status, detail, null, text)
+      }
+      return res.json() as Promise<ProblemImportResult>
+    })
+  },
+
+  getPlagiarismReport: (classroomId: number, problemId: number, params: { threshold?: number; language?: string; include_exempted?: boolean } = {}) =>
+    request<PlagiarismReport>(`/classrooms/${classroomId}/problems/${problemId}/plagiarism${qs(params)}`),
+
   // -- judging ----------------------------------------------------------
   /** Free-form playground run. Public endpoint, deliberately sent without auth. */
   run: (payload: RunRequest, timeoutMs: number) =>
@@ -304,6 +338,32 @@ export const api = {
   // -- history ----------------------------------------------------------
   listSubmissions: (query: SubmissionQuery = {}) =>
     request<SubmissionListResponse>(`/submissions${qs({ ...query })}`),
+
+  /** One recorded attempt with its source (author / problem teacher / admin). */
+  getSubmission: (id: number) => request<SubmissionDetail>(`/submissions/${id}`),
+
+  // -- Phase 4: AI tutor & teacher review -------------------------------
+  /** Whether the vLLM tutor answers, or the heuristic reviewer will serve. */
+  aiStatus: () => request<AIStatusResponse>('/ai/status', { auth: false }),
+
+  /** Ad-hoc review of a source file; nothing is stored on the server. */
+  aiAnalyze: (payload: AIAnalyzeRequest) =>
+    request<AIAnalyzeResponse>('/ai/analyze', {
+      method: 'POST',
+      body: payload,
+      timeoutMs: 45_000,
+    }),
+
+  /** Review a recorded attempt with the AI tutor and persist the feedback. */
+  aiReviewSubmission: (id: number) =>
+    request<SubmissionAIReviewResponse>(`/submissions/${id}/ai-review`, {
+      method: 'POST',
+      timeoutMs: 45_000,
+    }),
+
+  /** Teacher/admin manual score + feedback override for one attempt. */
+  teacherReviewSubmission: (id: number, payload: TeacherReviewRequest) =>
+    request<SubmissionDetail>(`/submissions/${id}/review`, { method: 'PATCH', body: payload }),
 
   health: () => request<HealthResponse>('/health', { auth: false }),
 }

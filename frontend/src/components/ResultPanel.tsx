@@ -12,6 +12,7 @@
  */
 import { useState } from 'react'
 import {
+  AlertTriangle,
   ChevronDown,
   ChevronRight,
   CircleCheck,
@@ -20,7 +21,9 @@ import {
   Info,
   Lock,
   Percent,
+  Sparkles,
   TriangleAlert,
+  Wrench,
 } from 'lucide-react'
 
 import { MetaChip, VerdictBadge } from './ui'
@@ -205,6 +208,88 @@ export function ResultPanel({ report, notice }: ResultPanelProps) {
           </span>
         ) : null}
       </div>
+
+      {/* 5-part Rubric Score Bars --------------------------------------- */}
+      {report.rubric ? (
+        <div className="border-b border-slate-800 bg-slate-950/70 p-3 text-xs">
+          <div className="flex items-center justify-between mb-2">
+            <span className="font-semibold text-slate-300 flex items-center gap-1.5">
+              <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
+              教學評分向度 (100 分制 Rubric)
+            </span>
+            <span className="font-mono font-bold text-indigo-300 text-sm">
+              總分 {report.rubric.total} / 100
+            </span>
+          </div>
+          <div className="grid grid-cols-5 gap-2 text-center text-[11px]">
+            <div className="bg-slate-900/80 p-2 rounded-lg border border-slate-800">
+              <div className="text-slate-400 text-[10px] mb-0.5">編譯成功</div>
+              <div className="font-mono font-bold text-slate-200">
+                {report.rubric.compile_score} <span className="text-[10px] text-slate-500">/ 10</span>
+              </div>
+            </div>
+            <div className="bg-slate-900/80 p-2 rounded-lg border border-slate-800">
+              <div className="text-slate-400 text-[10px] mb-0.5">公開範例</div>
+              <div className="font-mono font-bold text-slate-200">
+                {report.rubric.sample_score} <span className="text-[10px] text-slate-500">/ 10</span>
+              </div>
+            </div>
+            <div className="bg-slate-900/80 p-2 rounded-lg border border-slate-800">
+              <div className="text-slate-400 text-[10px] mb-0.5">隨機盲測</div>
+              <div className="font-mono font-bold text-slate-200">
+                {report.rubric.random_score} <span className="text-[10px] text-slate-500">/ 30</span>
+              </div>
+            </div>
+            <div className="bg-slate-900/80 p-2 rounded-lg border border-slate-800">
+              <div className="text-slate-400 text-[10px] mb-0.5">演算法邏輯</div>
+              <div className="font-mono font-bold text-indigo-300">
+                {report.rubric.logic_score} <span className="text-[10px] text-slate-500">/ 40</span>
+              </div>
+            </div>
+            <div className="bg-slate-900/80 p-2 rounded-lg border border-slate-800">
+              <div className="text-slate-400 text-[10px] mb-0.5">程序品質</div>
+              <div className="font-mono font-bold text-slate-200">
+                {report.rubric.quality_score} <span className="text-[10px] text-slate-500">/ 10</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* Formatting & Logic Diagnostic Banners -------------------------- */}
+      {report.presentationWarning ? (
+        <div className="flex items-start gap-2 border-b border-amber-500/20 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-400" />
+          <div>
+            <strong>格式排版提示 (Presentation Warning)：</strong>
+            輸出含有多餘尾隨空白或換行。裁判在放寬空白比對下判定通過，但請依題目格式要求輸出，避免正式競賽扣分。
+          </div>
+        </div>
+      ) : null}
+
+      {report.wordingViolations && report.wordingViolations.length > 0 ? (
+        <div className="flex items-start gap-2 border-b border-rose-500/20 bg-rose-500/10 px-3 py-2 text-[11px] text-rose-200">
+          <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-rose-400" />
+          <div>
+            <strong>限碼規範未通過 (Wording Rules Violation)：</strong>
+            <ul className="list-disc pl-4 mt-0.5 space-y-0.5 font-mono text-[10px]">
+              {report.wordingViolations.map((v, i) => (
+                <li key={i}>{v}</li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      ) : null}
+
+      {report.patchProbe?.patch_success ? (
+        <div className="flex items-start gap-2 border-b border-indigo-500/20 bg-indigo-500/10 px-3 py-2 text-[11px] text-indigo-200">
+          <Wrench className="mt-0.5 h-3.5 w-3.5 shrink-0 text-indigo-400" />
+          <div>
+            <strong>最小補丁探測修復 (Minimal Patch Probe)：</strong>
+            {report.patchProbe.details} (已修復: {(report.patchProbe.applied_fixes || []).join(', ')})，演算法邏輯酌予採計 {report.patchProbe.probed_logic_score} 分。
+          </div>
+        </div>
+      ) : null}
 
       {notice ? (
         <p className="flex items-start gap-2 border-b border-slate-800 bg-rose-500/10 px-3 py-2 text-[11px] text-rose-200">

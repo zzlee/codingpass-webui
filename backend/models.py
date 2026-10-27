@@ -11,7 +11,12 @@ Entity map
 ``TestCase``    one ``(stdin, expected stdout)`` pair; ``is_sample`` marks the
                 cases that are publicly visible to students.
 ``Submission``  one judged attempt of a problem by a student, with the aggregate
-                verdict (``status``, ``score``, ``passed_count`` / ``total_count``).
+                verdict (``status``, ``score``, ``passed_count`` / ``total_count``),
+                the 100-point rubric breakdown (``compile_score``,
+                ``sample_score``, ``random_score``, ``logic_score``,
+                ``quality_score``) and the formatting/wording flags
+                (``presentation_warning``, ``wording_pass``,
+                ``wording_violations``).
 
 Conventions
 -----------
@@ -32,6 +37,7 @@ from datetime import datetime
 from typing import Literal, Optional
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     Float,
@@ -148,7 +154,10 @@ class User(Base):
         back_populates="student", cascade="all, delete-orphan", passive_deletes=True
     )
     submissions: Mapped[list["Submission"]] = relationship(
-        back_populates="student", cascade="all, delete-orphan", passive_deletes=True
+        back_populates="student",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        foreign_keys="Submission.student_id",
     )
 
     # -- role helpers ------------------------------------------------------ #
@@ -297,6 +306,35 @@ class Problem(Base):
     )
     starter_code_c: Mapped[str] = mapped_column(Text, nullable=False, default="")
     starter_code_cpp: Mapped[str] = mapped_column(Text, nullable=False, default="")
+
+    # -- CodingPass-Tests problem-pack extensions (nullable, ALTER-added) ---- #
+    #: Official problem number from the pack folder name, e.g. ``P1001``.
+    problem_code: Mapped[Optional[str]] = mapped_column(
+        String(32), nullable=True, index=True
+    )
+    #: Teacher's reference solution (``*_庫題卡碼文標碼.cpp``), used for dual-run
+    #: answer generation and structural-similarity baselines. Never sent to students.
+    ref_code: Mapped[Optional[str]] = mapped_column(Text, nullable=True, default=None)
+    #: Language of :attr:`ref_code` (``'c'`` / ``'cpp'``), as discovered by the
+    #: pack importer from the reference file extension. ``None`` means "no
+    #: reference", and a reference is worthless without knowing how to build it.
+    ref_language: Mapped[Optional[str]] = mapped_column(
+        String(8), nullable=True, default=None
+    )
+    #: TeDa-Testing random input generator (``*_庫題卡測資０隨輸入.teda``).
+    teda_random_script: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, default=None
+    )
+    #: TeDa-Wording source rules (``*_庫題卡碼文限碼.txt``) evaluated by
+    #: :func:`wording_rules.check_wording_rules` at submission time.
+    wording_rules: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, default=None
+    )
+    #: Server-side path of the A4 problem statement PDF shipped with the pack.
+    pdf_path: Mapped[Optional[str]] = mapped_column(
+        String(255), nullable=True, default=None
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=utcnow, index=True
     )
@@ -335,6 +373,37 @@ class Problem(Base):
     def starter_for(self, language: str) -> str:
         """Starter source for ``language`` (``'c'`` or ``'cpp'``)."""
         return self.starter_code_cpp if language == Language.CPP else self.starter_code_c
+
+    # -- problem-pack capability flags --------------------------------------- #
+
+    @property
+    def has_ref_code(self) -> bool:
+        """True when a teacher reference solution (``*_庫題卡碼文標碼``) exists.
+
+        Drives dual-run answer generation, the structural-similarity baseline in
+        :mod:`plagiarism` and the "this looks like the model answer" exemption.
+        The reference itself is never serialised to students.
+        """
+        return bool(self.ref_code and self.ref_code.strip())
+
+    @property
+    def has_wording_rules(self) -> bool:
+        """True when a TeDa-Wording rule file (``*_庫題卡碼文限碼``) is attached.
+
+        When set, every submission is screened by
+        :func:`wording_rules.check_wording_rules` before it is scored.
+        """
+        return bool(self.wording_rules and self.wording_rules.strip())
+
+    @property
+    def has_random_generator(self) -> bool:
+        """True when a TeDa random-input generator can produce more cases."""
+        return bool(self.teda_random_script and self.teda_random_script.strip())
+
+    @property
+    def has_statement_pdf(self) -> bool:
+        """True when the pack's A4 statement PDF is stored on the server."""
+        return bool(self.pdf_path and self.pdf_path.strip())
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<Problem id={self.id} title={self.title!r} difficulty={self.difficulty}>"
@@ -400,8 +469,70 @@ class Submission(Base):
         DateTime, nullable=False, default=utcnow, index=True
     )
 
+    # -- Stage 4: 100-point rubric breakdown ---------------------------------- #
+    #: 10 points: ``10.0`` when the source compiled, else ``0.0``.
+    compile_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    #: 10 points scaled by the passed public samples (scaled to 40 when the
+    #: problem has no hidden cases, so the sample band absorbs the unrunnable
+    #: random band and the rubric still totals 100).
+    sample_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    #: 30 points scaled by the passed hidden (TeDa random) cases.
+    random_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    #: 40 points for algorithm correctness: ``40.0`` only when accepted, at most
+    #: :data:`~patch_probe.PATCHED_PASS_SCORE` when the minimal patch probe
+    #: rescued it, otherwise bounded by the measured pass ratio.
+    logic_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    #: 10 points for presentation and style: wording violations and trailing
+    #: whitespace are deducted here, never from correctness.
+    quality_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+
+    # -- Stage 4: format / wording flags -------------------------------------- #
+    #: Output was judged correct but is not byte-strict (trailing whitespace or
+    #: stray blank lines): a strict judge would have answered Presentation Error.
+    presentation_warning: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    #: Outcome of the TeDa-Wording screening (``*_庫題卡碼文限碼``). ``True``
+    #: whenever the problem declares no rules, so "no rules" can never read as
+    #: a fault.
+    wording_pass: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    #: JSON-encoded list of human-readable violated rule lines, else ``None``.
+    wording_violations: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, default=None
+    )
+
+    #: Markdown feedback produced by the AI reviewer (or the heuristic fallback).
+    ai_feedback: Mapped[Optional[str]] = mapped_column(Text, nullable=True, default=None)
+    #: Score the AI reviewer suggested, 0.0 - 100.0 (advisory, never auto-applied).
+    ai_suggested_score: Mapped[Optional[float]] = mapped_column(
+        Float, nullable=True, default=None
+    )
+    #: Model id that produced :attr:`ai_feedback` (fallback marker when heuristic).
+    ai_model: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, default=None)
+    #: When the AI review above was generated.
+    ai_reviewed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True, default=None
+    )
+
+    # -- Phase 4: teacher review ------------------------------------------------ #
+    #: Free-form feedback written by the teacher.
+    teacher_feedback: Mapped[Optional[str]] = mapped_column(Text, nullable=True, default=None)
+    #: Teacher's manual score override, 0.0 - 100.0.
+    teacher_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True, default=None)
+    #: Teacher (or admin) who graded the attempt.
+    reviewed_by_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    #: When the teacher review above was stored.
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True, default=None
+    )
+
     problem: Mapped["Problem"] = relationship(back_populates="submissions")
-    student: Mapped["User"] = relationship(back_populates="submissions")
+    #: ``foreign_keys`` is required: ``Submission`` now has two FKs into ``users``.
+    student: Mapped["User"] = relationship(
+        back_populates="submissions", foreign_keys=[student_id]
+    )
 
     __table_args__ = (
         CheckConstraint(
@@ -418,6 +549,28 @@ class Submission(Base):
     @property
     def accepted(self) -> bool:
         return self.status == SubmissionStatus.ACCEPTED
+
+    @property
+    def rubric_total(self) -> float:
+        """The five subscores summed, clamped to ``0.0 - 100.0``.
+
+        ``score`` stays the platform-style pass percentage; this is the teaching
+        rubric total (``compile + sample + random + logic + quality``).
+        """
+        return round(
+            min(
+                100.0,
+                max(
+                    0.0,
+                    self.compile_score
+                    + self.sample_score
+                    + self.random_score
+                    + self.logic_score
+                    + self.quality_score,
+                ),
+            ),
+            2,
+        )
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return (

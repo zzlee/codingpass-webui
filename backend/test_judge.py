@@ -84,9 +84,9 @@ int main(){ for (int i = 0; i < 3; i++) { fork(); } for(;;); return 0; }
 """
 r = client.post("/api/run", json={"code": fork_bomb, "language": "c"}).json()
 check("fork+spin killed", r["status"] in ("time_limit_exceeded", "runtime_error"), r["status"])
-check("no zombies left", __import__("subprocess").run(
-    ["ps", "-eo", "stat"], capture_output=True, text=True
-).stdout.count("Z") == 0)
+_ps = __import__("subprocess").run(["ps", "-eo", "stat,comm"], capture_output=True, text=True).stdout.splitlines()
+_zombies = [ln for ln in _ps if ln.split() and ln.split()[-1] == "solution" and ln.split()[0].startswith("Z")]
+check("no zombies left", not _zombies, _zombies[:3])
 
 # --- runtime error: segfault --------------------------------------------- #
 segv = "#include <stdlib.h>\nint main(){ int *p = (int*)0; *p = 42; return 0; }"
@@ -100,8 +100,9 @@ alloc = """
 #include <stdlib.h>
 #include <string.h>
 int main(){ char *p = malloc(1024u*1024u*64u); if(!p) return 2;
-memset(p, 1, 1024u*1024u*64u); char *q = malloc(1024u*1024u*64u);
-memset(q, 2, 1024u*1024u*64u); char *z = malloc(1024u*1024u*256u); return z ? 0 : 3; }
+memset(p, 1, 1024u*1024u*64u); char *q = malloc(1024u*1024u*64u); if(!q) return 2;
+memset(q, 2, 1024u*1024u*64u); char *z = malloc(1024u*1024u*256u);
+return z ? (int)(((volatile char*)p)[0] + ((volatile char*)q)[0] + ((volatile char*)z)[0]) : 3; }
 """
 r = client.post("/api/run", json={"code": alloc, "language": "c"}).json()
 check("oom runtime_error", r["status"] == "runtime_error", (r["status"], r["exit_code"], r["stderr"][-160:]))
@@ -125,7 +126,7 @@ spam = "#include <stdio.h>\nint main(){ for(long i=0;i<400000;i++) puts(\"012345
 r = client.post("/api/run", json={"code": spam, "language": "c"}).json()
 check("output truncated", r["status"] == "success" and r["truncated"], (len(r["stdout"]), r["truncated"]))
 
-r = client.post("/api/run", json={"code": "#include <stdio.h>\nint main(){ puts(getenv(\"PATH\")?\"env-ok\":\"no-env\"); }", "language": "c"}).json()
+r = client.post("/api/run", json={"code": "#include <stdio.h>\n#include <stdlib.h>\nint main(){ puts(getenv(\"PATH\")?\"env-ok\":\"no-env\"); }", "language": "c"}).json()
 check("runs with stdin omitted", r["status"] == "success" and "env-ok" in r["stdout"], r)
 
 # --- validation ----------------------------------------------------------- #

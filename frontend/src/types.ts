@@ -211,6 +211,12 @@ export interface ProblemSummary {
   created_at: string
   sample_count: number
   hidden_count: number
+  problem_code?: string | null
+  has_ref_code?: boolean
+  has_wording_rules?: boolean
+  has_random_generator?: boolean
+  has_statement_pdf?: boolean
+  pdf_path?: string | null
 }
 
 /** `ProblemDetail` - `GET /api/problems/{id}` (samples only for students). */
@@ -219,6 +225,16 @@ export interface ProblemDetail extends ProblemSummary {
   starter_code_c: string
   starter_code_cpp: string
   test_cases: TestCasePublic[]
+  wording_rules?: string | null
+}
+
+/** `ProblemImportResult` - response of `POST /api/problems/import-pack`. */
+export interface ProblemImportResult extends ProblemDetail {
+  pack_name: string
+  pack_source: string
+  sample_case_count: number
+  random_case_count: number
+  warnings: string[]
 }
 
 /** `ProblemListResponse`. */
@@ -251,6 +267,7 @@ export interface CaseVerdict {
   exit_code: number | null
   signal_name: string | null
   truncated: boolean
+  presentation_warning?: boolean
   /** `null` for hidden cases seen by a student. */
   input: string | null
   expected_output: string | null
@@ -263,6 +280,29 @@ export interface HiddenSummary {
   total: number
   passed: number
   failed: number
+}
+
+/** Rubric breakdown (compile 10 + sample 10 + random 30 + logic 40 + quality 10). */
+export interface RubricScores {
+  compile_score: number
+  sample_score: number
+  random_score: number
+  logic_score: number
+  quality_score: number
+  total: number
+}
+
+/** Minimal Patch Probe diagnostic report. */
+export interface PatchProbeReport {
+  needed: boolean
+  patch_success: boolean
+  probed_logic_score: number
+  details: string
+  baseline_status?: string
+  applied_fixes?: string[]
+  attempted_fixes?: string[]
+  cases_tested?: number
+  cases_passed?: number
 }
 
 /** `SubmissionResult` - full grading report of `POST /api/problems/{id}/submit`. */
@@ -286,6 +326,13 @@ export interface SubmissionResult {
   trial_run: boolean
   results: CaseVerdict[]
   hidden_summary: HiddenSummary
+
+  /* -- Stage 3 & 4 Rubric, Formatting and Probe -- */
+  rubric?: RubricScores
+  presentation_warning?: boolean
+  wording_pass?: boolean
+  wording_violations?: string[]
+  patch_probe?: PatchProbeReport | null
 }
 
 /** `SubmissionOut` - one row of `GET /api/submissions`. */
@@ -303,6 +350,29 @@ export interface SubmissionRow {
   total_count: number
   execution_time_ms: number
   created_at: string
+
+  /* -- Stage 4: 100-point rubric breakdown -- */
+  rubric_total?: number
+  rubric?: RubricScores
+  presentation_warning?: boolean
+  wording_pass?: boolean
+  wording_violations?: string[]
+
+  /* -- Phase 4: AI tutor + teacher review (`null` until somebody reviews) -- */
+  /** Markdown review produced by the AI tutor. */
+  ai_feedback?: string | null
+  /** Advisory score suggested by the AI (0-100). */
+  ai_suggested_score?: number | null
+  /** Model that produced `ai_feedback`. */
+  ai_model?: string | null
+  ai_reviewed_at?: string | null
+  /** Teacher's written feedback. */
+  teacher_feedback?: string | null
+  /** Teacher's manual score (0-100). */
+  teacher_score?: number | null
+  /** Teacher/admin account that graded the attempt. */
+  reviewed_by_id?: number | null
+  reviewed_at?: string | null
 }
 
 /** `SubmissionListResponse`. */
@@ -310,6 +380,100 @@ export interface SubmissionListResponse {
   total: number
   count: number
   submissions: SubmissionRow[]
+}
+
+/** `SubmissionDetailOut` - one recorded attempt including its source code. */
+export interface SubmissionDetail extends SubmissionRow {
+  /** Complete source file that was submitted and graded. */
+  code: string
+}
+
+/** `AIStatusResponse` - body of `GET /api/ai/status`. */
+export interface AIStatusResponse {
+  /** True when the configured vLLM tutor answers a probe request. */
+  available: boolean
+  provider: string
+  model: string
+  base_url: string
+  detail: string
+}
+
+/** Body of `POST /api/ai/analyze` (ad-hoc review, nothing is stored). */
+export interface AIAnalyzeRequest {
+  code: string
+  language: Language
+  /** Judge verdict for this source, if known (`'unknown'` otherwise). */
+  status?: string
+  compile_output?: string
+  stderr?: string
+  /** Attach the problem statement as context; requires authentication. */
+  problem_id?: number | null
+}
+
+/** `AIAnalyzeResponse` - structured review produced by the AI tutor. */
+export interface AIAnalyzeResponse {
+  summary: string
+  error_analysis: string
+  time_complexity: string
+  space_complexity: string
+  suggestions: string[]
+  /** Advisory score suggested by the AI (0-100). */
+  suggested_score: number
+  /** The full review as Markdown (what gets persisted on a submission). */
+  feedback_markdown: string
+  model: string
+  /** False when the heuristic reviewer answered instead of the LLM. */
+  ai_powered: boolean
+  /** Why the heuristic fallback was used, when applicable. */
+  detail?: string
+}
+
+/** `SubmissionAIReviewResponse` - stored AI review plus its structured analysis. */
+export interface SubmissionAIReviewResponse extends SubmissionDetail {
+  analysis: AIAnalyzeResponse
+}
+
+/** Body of `PATCH /api/submissions/{id}/review` (teacher/admin grading). */
+export interface TeacherReviewRequest {
+  teacher_score?: number | null
+  teacher_feedback?: string | null
+}
+
+/** One suspicious student pair reported by the structural plagiarism screen. */
+export interface PlagiarismPair {
+  student_a: string
+  student_b: string
+  submission_id_a: number
+  submission_id_b: number
+  language: string
+  combined_similarity: number
+  ast_similarity: number
+  token_similarity: number
+  ngram_jaccard: number
+  ref_similarity_a?: number | null
+  ref_similarity_b?: number | null
+  flagged: boolean
+  exemption?: string | null
+}
+
+/** `PlagiarismReport` - response of `GET /api/classrooms/{cid}/problems/{pid}/plagiarism`. */
+export interface PlagiarismReport {
+  problem_id: number
+  problem_title: string
+  problem_code?: string | null
+  classroom_id: number
+  classroom_name: string
+  threshold: number
+  reference_available: boolean
+  languages: string[]
+  submissions_compared: number
+  students_compared: number
+  pair_count: number
+  flagged_count: number
+  exempt_count: number
+  skipped_trivial: number
+  truncated: boolean
+  pairs: PlagiarismPair[]
 }
 
 /** Tabs of the application shell. */

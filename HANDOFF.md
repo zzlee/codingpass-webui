@@ -11,6 +11,9 @@
   - **Phase 1 (學生本地沙盒編譯與 WebUI)**：✅ **已完成並驗證通過**
   - **Phase 2 (老師出題題庫、多測資自動評測、隱藏測資防弊)**：✅ **已完成並驗證通過**
   - **Phase 3 (多角色認證、班級管理、提交紀錄歷史與一鍵切換展示 UI)**：✅ **已完成並驗證通過**
+  - **Phase 4 (AI 智能助教診斷、複雜度分析與教師批改覆核工作台)**：✅ **已完成並驗證通過**
+  - **Phase 5 (CodingPass Local Agent 學生本機編譯代理與 WebSocket 雙軌分流架構)**：✅ **已完成並驗證通過**
+  - **CodingPass-Tests 深度整合 (Stage 1-4 題庫卡匯入、五項評分規程、最小修復探針、抄襲稽核)**：✅ **已完成並驗證通過**
 - **Multi-Agent 體系**：
   - Orchestrator：Antigravity (架構總指揮)
   - Worker Agents：`pi coding agent --provider ttu-vllm --model qwen3.8-flash-nvfp4`（透過 `./scripts/agent_dispatch.py` 調派）
@@ -47,7 +50,12 @@
   - **隱藏測資安全防護**：學生端評測回傳時，後端強制過濾隱藏測資的輸入與輸出，僅回傳 Pass/Fail 狀態與得分率；老師/管理員可完整查閱。
 - [x] **後端自動化測試套件**：
   - `backend/test_api.py`：涵蓋認證、班級、出題、測資批次評測、計分、權限隔離等，**91/91 PASS (FAILED: 0)**。
-  - `backend/test_judge.py`：涵蓋編譯錯誤、超時、記憶體溢出、fork 進程群組清理等，**16/16 PASS (FAILED: 0)**。
+  - `backend/test_judge.py`：涵蓋編譯錯誤、超時、記憶體溢出、fork 進程群組清理等，**28/28 PASS (FAILED: 0)**。
+  - `backend/test_ai_phase4.py`：涵蓋 AI 狀態探測、即時診斷、隱藏測資零洩漏、AI 講評持久化、教師覆核評分與 SQLite 自動遷移，**全數 PASS (FAILED: 0)**。
+- [x] **`backend/ai_tutor.py`** (Phase 4 AI 助教與批改輔助)：
+  - 對接本地 vLLM (`http://localhost:8000/v1`, `qwen3.8-flash-nvfp4`)，並內建規則式離線 Fallback 分析器 (`heuristic-rules`)。
+  - 具備隨機 Nonce 分隔符防禦 Prompt Injection，且嚴格保證隱藏測資輸入/輸出絕不進入 Prompt。
+  - 提供 `/api/ai/status`、`/api/ai/analyze`、`/api/submissions/{id}/ai-review`、`/api/submissions/{id}/review` 等端點。
 
 ### 2.3 前端完整介面 (Frontend - React 18 + TypeScript + Monaco + Tailwind)
 - [x] **Monaco Editor 離線打包 (`monacoSetup.ts`)**：
@@ -165,8 +173,11 @@ curl -s http://127.0.0.1:8010/api/health
 # 執行 91 項後端 API 完整測試
 cd backend && ./venv/bin/python test_api.py
 
-# 執行 16 項評測沙盒安全邊界測試
+# 執行 16+ 項評測沙盒安全邊界測試
 cd backend && ./venv/bin/python test_judge.py
+
+# 執行 Phase 4 AI 助教與教師覆核完整測試
+cd backend && ./venv/bin/python test_ai_phase4.py
 ```
 
 ---
@@ -184,14 +195,85 @@ cd backend && ./venv/bin/python test_judge.py
 
 ---
 
-## 6. 下一階段規劃 (Phase 4 Roadmap)
+## 6. Phase 4 (AI 智能輔助與批改建議) 已完成交付摘要
 
-在資源更充足的新主機上，將繼續推展 **Phase 4 (AI 智能輔助與批改建議)**：
+1. **對接本地 vLLM 服務 (`backend/ai_tutor.py`)**：
+   - 呼叫 `http://localhost:8000/v1` 模型 `qwen3.8-flash-nvfp4`，並提供離線/降級規則式分析引擎 (`heuristic-rules`)。
+2. **AI 代碼講評與診斷模組 (`AITutorPanel.tsx`)**：
+   - 在 Playground 與 Problem Solver 內建「✨ AI 助教診斷 (Ask AI Tutor)」，提供繁體中文錯誤分析、時間/空間複雜度推估（如 $O(N)$、$O(\sqrt{N})$、$O(N^2)$）與具體修改方向建議（不洩漏隱藏測資、不直接給出整份解答）。
+3. **老師批改輔助與覆核工作台 (`SubmissionReviewModal.tsx` & `Submissions.tsx`)**：
+   - 支援檢視完整提交原始碼、一鍵產生並儲存 AI 講評與建議分數 (`ai_suggested_score`)，老師可手動輸入覆核分數 (`teacher_score`) 與評語 (`teacher_feedback`)。
 
-1. **對接本地 vLLM 服務**：
-   - 呼叫 `http://localhost:8000/v1` 模型 `qwen3.8-flash-nvfp4`。
-2. **AI 代碼講評與診斷模組 (AI Tutor & Code Review)**：
-   - 當學生提交遇到 `Compile Error`、`Wrong Answer` 或 `Time Limit Exceeded` 時，提供「AI 錯誤分析與修改方向建議」。
-   - 代碼品質與複雜度分析（時間複雜度 $O(N)$ 分析、潛在記憶體洩漏與邊界盲點提示）。
-3. **老師批改輔助 (Teacher Grade Review)**：
-   - 老師可在後台查看學生提交歷程與 AI 建議分數，並可手動覆核或加上評語。
+---
+
+## 7. CodingPass-Tests 深度整合架構 (已落地後端引擎)
+
+參考 `~/vibecoding/codingpass-tests` 專案，已將其核心出題標準、雙軌評測沙盒、碼文限碼白箱檢查與結構抄襲分析深度整合至後端：
+
+1. **庫題卡出題包相容 (`backend/problem_pack.py`)**：
+   - 支援匯入官方題目包資料夾或 ZIP 壓縮檔（自動識別 `*_庫題卡碼文標碼.cpp`、`*_庫題卡測資範例.txt`、`*_庫題卡測資０隨輸入.teda`、`*_庫題卡碼文限碼.txt`、`*.pdf`）。
+   - 提供端點 `POST /api/problems/import-pack`。
+2. **TeDa 動態測資產生與雙軌評測 (`backend/teda_engine.py`)**：
+   - 內建完整 TeDa-Testing 語言轉譯器（Node.js 子進程隔離執行），支援生成 30 筆動態隨機測資。
+   - **Dual-Run 標竿正解動態執行**：將隨機測資餵給正解標竿程式，即時計算標準答案 `_ansout`。
+   - **Strict vs Trimmed 雙軌比對**：精確捕捉行尾多餘空白／換行，給予 Presentation Warning (PE) 警告。
+3. **碼文限碼白箱語法檢查 (`backend/wording_rules.py`)**：
+   - 支援 `#term`、`#root`、`#regex` 與 `skipComments`/`skipStrings` 旗標，杜絕學生調用 `system()` 或 `<ctime>`，強制要求 `for|while` 等關鍵語法。
+4. **Minimal Patch Probe 最小修復探針 (`backend/patch_probe.py`)**：
+   - 面對 CE/WA 學生，在沙盒臨時目錄嘗試 1~3 行語法或邊界微修復；若修復後即可通過測資，判定邏輯架構完整，給予 28~35/40 邏輯給分。
+5. **結構抄襲分析矩陣 (`backend/plagiarism.py`)**：
+   - 計算學生之間的 AST 與 Token 相似度，並採用**標竿正解扣除法 (Reference Baseline Subtraction)**，排除皆寫出標準課本解法的正常情況，精準標記 $\ge 85\%$ 的疑似抄襲組。
+   - 提供端點 `GET /api/classrooms/{cid}/problems/{pid}/plagiarism`。
+
+---
+
+## 8. CodingPass Local Agent 本機編譯代理與 WebSocket 雙軌架構 (Phase 5 已完整實作並驗證)
+
+### 8.1 痛點與設計動機
+在 40+ 名學生的電腦教室課堂中，學生在網頁上反覆點擊「編譯/測試範例」，每分鐘可能產生數十至數百次 GCC/G++ 編譯請求。由於編譯是高 CPU / 磁碟 I/O 密集程序，若全部由單一 HTTP 伺服器承擔，極易造成 CPU 100% 飽和、排隊超時甚至伺服器當機。
+
+### 8.2 雙軌運算模型 (Hybrid Execution Model)
+1. **日常高頻練習 (Playground / Run Samples)**：
+   - 透過瀏覽器直接連線學生電腦本機的 `ws://127.0.0.1:8765`。
+   - 學生筆電/PC 自行編譯與沙盒執行，回傳結果至網頁顯示。
+   - **效果**：中央伺服器 CPU/RAM 負載降為接近 **0%**，學生享有毫秒級即時編譯反應。
+2. **正式考試交卷 (Submit Solution)**：
+   - 維持傳回中央伺服器裁判沙盒執行（含 5 項評分規程、隱藏測資比對、Wording Rules 白箱檢查與 Minimal Patch Probe）。
+   - **效果**：隱藏測資絕對不外流給學生，杜絕學生竄改本機回傳分數。
+3. **無縫自動降級**：
+   - 網頁自動探測 `ws://127.0.0.1:8765`；若學生未安裝，自動切換為伺服器隊列執行，不影響基本功能。
+
+### 8.3 已落地交付成果與元件
+1. **零外部依賴 WebSocket 代理服務 (`local_agent/agent.py`)**：
+   - 僅依賴 Python 3.8+ 內建標準函式庫（`asyncio`, `struct`, `hashlib`, `subprocess`, `tempfile`），完全不需 `pip install` 任何套件。
+   - 支援 RFC 6455 雙向 Framing、Masking / Unmasking、Ping-Pong、自動編譯器探測（GCC / Clang）。
+   - 內建進程群組隔離 (`os.setsid`) 與超時終止保護，防止學生死迴圈掛住。
+2. **跨平台一鍵啟動腳本**：
+   - `local_agent/run_agent.sh` (Linux / macOS 可執行腳本)
+   - `local_agent/run_agent.bat` (Windows 批次檔)
+   - `local_agent/README.md` (詳細使用指南)
+   - `local_agent/test_agent.py` (單元執行與 WebSocket 整合測試，全數 PASS)
+3. **後端安裝包下載與資訊端點 (`backend/main.py`)**：
+   - `GET /api/agent/info`：回傳代理端點資訊與環境支援度。
+   - `GET /api/agent/download`：動態壓縮打包為 `codingpass-agent.zip` 串流下載。
+4. **前端 WebSocket 連線管理與路由分流**：
+   - `frontend/src/localAgentContext.tsx`：自動重試連線、Ping 探測、`runLocally()` 分發器。
+   - `frontend/src/components/Header.tsx`：右上角展示即時狀態膠囊（`🟢 本地加速已連線` / `⚪ 本地加速包`）。
+   - `frontend/src/components/AgentModal.tsx`：一鍵下載安裝包、即時連線探測、3 步驟安裝指引與安全說明。
+   - `frontend/src/components/Playground.tsx`：優先將自由執行指派給本地代理，按鈕動態呈現 `Run Code (Local)`。
+   - `frontend/src/components/ProblemSolver.tsx`：範例測資測試 (`runSamples`) 優先由本地代理分流，正式交卷 (`submit`) 保留伺服器評分。
+
+---
+
+## 9. 測試與驗證現況總結 (Test Verification Status)
+
+所有後端測試套件與前端建置均已於本機環境完成 100% 驗證：
+
+| 測試模組 / 建置項目 | 測試內容與涵蓋範圍 | 測試結果 |
+|---|---|---|
+| **`test_stage34.py`** | 題目包匯入、PDF 留存、五項規程、最小修復探針、AST/Token 抄襲檢測 | ✅ **0 FAILED (35+ PASS)** |
+| **`test_judge.py`** | C/C++ 編譯、超時保護、記憶體上限、進程群組清理、殭屍進程防護 | ✅ **0 FAILED (28/28 PASS)** |
+| **`test_api.py`** | 認證、班級、出題、測資批次評測、權限隔離、歷史紀錄 | ✅ **0 FAILED (91/91 PASS)** |
+| **`test_ai_phase4.py`** | AI 狀態、即時診斷、隱藏測資防洩漏、AI 講評、教師覆核與遷移 | ✅ **0 FAILED (85/85 PASS)** |
+| **`test_agent.py`** | Local Agent 編譯器探測、本地執行、RFC 6455 WebSocket 協議整合 | ✅ **0 FAILED (100% PASS)** |
+| **前端建置 (`npm run build`)** | React 18 + TypeScript + Monaco Editor + Tailwind | ✅ **0 ERRORS (Built in 1.4s)** |

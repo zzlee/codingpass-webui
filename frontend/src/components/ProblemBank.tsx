@@ -27,6 +27,7 @@ import {
 
 import { DifficultyBadge, EmptyState, ErrorNotice, LoadingRow, MetaChip, Segmented, Spinner } from './ui'
 import ProblemCreateModal from './ProblemCreateModal'
+import ImportPackModal from './ImportPackModal'
 import SectionHeading from './SectionHeading'
 import { useAuth } from '../authContext'
 import { api, type ProblemQuery } from '../api'
@@ -60,6 +61,7 @@ export function ProblemBank({ onOpen }: ProblemBankProps) {
   const [mineOnly, setMineOnly] = useState(false)
   const [search, setSearch] = useState('')
   const [createOpen, setCreateOpen] = useState(false)
+  const [importOpen, setImportOpen] = useState(false)
   const [extra, setExtra] = useState<{ token: string; rows: ProblemSummary[]; total: number } | null>(
     null,
   )
@@ -131,14 +133,24 @@ export function ProblemBank({ onOpen }: ProblemBankProps) {
         icon={<BookOpen className="h-4 w-4" aria-hidden="true" />}
         actions={
           staff ? (
-            <button
-              type="button"
-              onClick={() => setCreateOpen(true)}
-              className={buttonClass('primary', 'text-xs')}
-            >
-              <Plus className="h-4 w-4" aria-hidden="true" />
-              Create Problem
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setImportOpen(true)}
+                className={buttonClass('subtle', 'text-xs')}
+              >
+                <Sparkles className="h-4 w-4 text-indigo-400" aria-hidden="true" />
+                匯入庫題卡
+              </button>
+              <button
+                type="button"
+                onClick={() => setCreateOpen(true)}
+                className={buttonClass('primary', 'text-xs')}
+              >
+                <Plus className="h-4 w-4" aria-hidden="true" />
+                Create Problem
+              </button>
+            </div>
           ) : null
         }
       />
@@ -316,6 +328,16 @@ export function ProblemBank({ onOpen }: ProblemBankProps) {
           setCreateOpen(false)
           // Refetch page 1: the new problem may sort into any filter, and the
           // server stays the single source of truth for what the caller may see.
+          list.reload()
+        }}
+      />
+
+      <ImportPackModal
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+        classrooms={classrooms}
+        defaultClassroomId={/^[1-9]\d*$/.test(classroomFilter) ? Number(classroomFilter) : null}
+        onImported={() => {
           list.reload()
         }}
       />

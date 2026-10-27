@@ -18,10 +18,12 @@ import {
   Plus,
   RefreshCw,
   School,
+  ShieldAlert,
   Users,
 } from 'lucide-react'
 
 import SectionHeading from './SectionHeading'
+import PlagiarismModal from './PlagiarismModal'
 import { DifficultyBadge, EmptyState, ErrorNotice, Field, LoadingRow, MetaChip, Modal, Spinner } from './ui'
 import { useAuth } from '../authContext'
 import api, { ApiError } from '../api'
@@ -49,6 +51,7 @@ function ClassroomCard({
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
+  const [auditProblem, setAuditProblem] = useState<{ id: number; title: string } | null>(null)
 
   const toggle = async () => {
     const next = !open
@@ -186,26 +189,50 @@ function ClassroomCard({
                 ) : (
                   <ul className="space-y-1.5">
                     {detail.problems.map((problem) => (
-                      <li key={problem.id}>
+                      <li key={problem.id} className="flex items-center gap-2">
                         <button
                           type="button"
                           onClick={() => onOpenProblem(problem.id)}
-                          className="flex w-full items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/40 px-2.5 py-1.5 text-left transition-colors hover:border-sky-500/60 hover:bg-slate-900"
+                          className="flex w-full items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/40 px-2.5 py-1.5 text-left transition-colors hover:border-sky-500/60 hover:bg-slate-900 min-w-0 flex-1"
                         >
                           <span className="min-w-0 flex-1 truncate text-[11px] font-semibold text-slate-200">
                             {problem.title}
                           </span>
                           <DifficultyBadge difficulty={problem.difficulty} />
-                          <span className="font-mono text-[10px] text-slate-500">
+                          <span className="font-mono text-[10px] text-slate-500 shrink-0">
                             {problem.sample_count + problem.hidden_count} cases
                           </span>
                         </button>
+                        {canManage ? (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              setAuditProblem({ id: problem.id, title: problem.title })
+                            }}
+                            title="查重審查 (Plagiarism Screen)"
+                            className="p-1.5 rounded-lg border border-slate-800 hover:border-rose-500/40 hover:bg-rose-500/10 text-slate-400 hover:text-rose-300 transition shrink-0"
+                          >
+                            <ShieldAlert className="w-3.5 h-3.5" />
+                          </button>
+                        ) : null}
                       </li>
                     ))}
                   </ul>
                 )}
               </div>
             </div>
+          ) : null}
+
+          {auditProblem ? (
+            <PlagiarismModal
+              open={Boolean(auditProblem)}
+              onClose={() => setAuditProblem(null)}
+              classroomId={classroom.id}
+              classroomName={classroom.name}
+              problemId={auditProblem.id}
+              problemTitle={auditProblem.title}
+            />
           ) : null}
         </div>
       ) : null}

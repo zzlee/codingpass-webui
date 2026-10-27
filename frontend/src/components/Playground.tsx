@@ -14,10 +14,13 @@ import { CodeXml, Eraser, LoaderCircle, Play } from 'lucide-react'
 
 import '../monacoSetup'
 import { EDITOR_OPTIONS, EDITOR_THEME } from '../monacoSetup'
+import AITutorPanel from './AITutorPanel'
 import ConsolePanel from './ConsolePanel'
 import { Segmented } from './ui'
 import { useCtrlEnter } from '../shortcuts'
 import { useWorkspace } from '../workspaceContext'
+import { useLocalAgent } from '../localAgentContext'
+import { api } from '../api'
 import {
   findTemplateId,
   templatesFor,
@@ -52,6 +55,8 @@ export function Playground() {
     health,
   } = useWorkspace()
 
+  const localAgent = useLocalAgent()
+
   // Synchronous double-press guard on top of the provider's own guard.
   const pressedRef = useRef(false)
   const templates = useMemo(() => templatesFor(language), [language])
@@ -62,11 +67,21 @@ export function Playground() {
     if (pressedRef.current) return
     pressedRef.current = true
     try {
-      await runCode()
+      await runCode(async (body) => {
+        if (localAgent.status === 'connected') {
+          try {
+            return await localAgent.runLocally(body)
+          } catch (agentErr) {
+            console.warn('Local agent run failed, falling back to server judge:', agentErr)
+            return await api.run(body, 20_000)
+          }
+        }
+        return await api.run(body, 20_000)
+      })
     } finally {
       pressedRef.current = false
     }
-  }, [runCode])
+  }, [runCode, localAgent])
 
   useCtrlEnter(() => {
     void handleRun()
@@ -143,7 +158,11 @@ export function Playground() {
               type="button"
               onClick={() => void handleRun()}
               disabled={running}
-              title="Compile and run your submission (Ctrl+Enter / Cmd+Enter)"
+              title={
+                localAgent.status === 'connected'
+                  ? '由本機 CodingPass Local Agent 即時編譯執行 (Ctrl+Enter / Cmd+Enter)'
+                  : 'Compile and run your submission (Ctrl+Enter / Cmd+Enter)'
+              }
               className="inline-flex items-center gap-2 rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-semibold text-slate-950 shadow-lg shadow-emerald-950/40 transition-all hover:bg-emerald-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300 disabled:cursor-not-allowed disabled:opacity-70"
             >
               {running ? (
@@ -151,7 +170,7 @@ export function Playground() {
               ) : (
                 <Play className="h-3.5 w-3.5" fill="currentColor" aria-hidden="true" />
               )}
-              <span>{running ? 'Compiling…' : 'Run Code'}</span>
+              <span>{running ? 'Compiling…' : localAgent.status === 'connected' ? 'Run Code (Local)' : 'Run Code'}</span>
             </button>
           </div>
         </div>
@@ -184,14 +203,22 @@ export function Playground() {
         </div>
       </section>
 
-      {/* Console --------------------------------------------------------- */}
-      <section className="flex min-h-[20rem] min-w-0 flex-col lg:min-h-0 lg:basis-[42%]">
+      {/* Console + AI tutor ---------------------------------------------- */}
+      <section className="flex min-h-[20rem] min-w-0 flex-col gap-3 lg:min-h-0 lg:basis-[42%]">
         <ConsolePanel
           stdin={stdin}
           onStdinChange={setStdin}
           response={response}
           running={running}
           transportError={transportError}
+        />
+        <AITutorPanel
+          code={code}
+          language={language}
+          status={response?.status}
+          compileOutput={response?.compile_output}
+          stderr={response?.stderr}
+          compact
         />
       </section>
     </div>

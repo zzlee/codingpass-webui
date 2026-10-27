@@ -271,7 +271,8 @@ OOM_C = """
 #include <stdlib.h>
 #include <string.h>
 int main(void){ char *p = malloc(300u*1024u*1024u);
-  if (!p) return 3; memset(p, 1, 300u*1024u*1024u); return 0; }
+  if (!p) return 3; memset(p, 1, 300u*1024u*1024u);
+  return ((volatile char *)p)[0] == 99 ? 0 : 4; }
 """
 PRIME_CPP = """
 #include <iostream>

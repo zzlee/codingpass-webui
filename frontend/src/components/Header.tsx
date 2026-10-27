@@ -14,6 +14,8 @@ import {
   CircleAlert,
   CircleCheck,
   CircleDashed,
+  Download,
+  Laptop,
   LogIn,
   LogOut,
   RefreshCw,
@@ -24,10 +26,12 @@ import {
 } from 'lucide-react'
 
 import { RoleBadge } from './ui'
+import AgentModal from './AgentModal'
 import { APP_TABS } from '../tabs'
 import { useAuth } from '../authContext'
 import type { QuickAccount } from '../authAccounts'
 import { useWorkspace } from '../workspaceContext'
+import { useLocalAgent } from '../localAgentContext'
 import { displayName, initials } from '../format'
 import type { AppTab, BackendHealth } from '../types'
 
@@ -87,6 +91,54 @@ function HealthPill({ health, onHealthCheck }: { health: BackendHealth; onHealth
         }`}
         aria-hidden="true"
       />
+    </button>
+  )
+}
+
+function LocalAgentPill({ onOpenModal }: { onOpenModal: () => void }) {
+  const { status, compilerInfo } = useLocalAgent()
+
+  if (status === 'connected') {
+    return (
+      <button
+        type="button"
+        onClick={onOpenModal}
+        title={`本地代理加速運作中\n編譯器: ${compilerInfo || 'g++ / clang++'}\n點擊查看設定與狀態`}
+        className="group inline-flex items-center gap-1.5 rounded-full border border-sky-500/40 bg-sky-500/10 px-2.5 py-1.5 text-xs font-medium text-sky-300 transition-colors hover:brightness-125 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+      >
+        <span className="h-2 w-2 shrink-0 rounded-full bg-sky-400 shadow-[0_0_8px_2px_rgba(56,189,248,0.55)]" aria-hidden="true" />
+        <Laptop className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+        <span className="hidden whitespace-nowrap xl:inline">本地加速已連線</span>
+        <span className="xl:hidden">本地加速</span>
+      </button>
+    )
+  }
+
+  if (status === 'connecting') {
+    return (
+      <button
+        type="button"
+        onClick={onOpenModal}
+        title="正在嘗試連線本地代理 (ws://127.0.0.1:8765)... 點擊查看設定"
+        className="inline-flex items-center gap-1.5 rounded-full border border-slate-700 bg-slate-800/60 px-2.5 py-1.5 text-xs font-medium text-slate-400 hover:text-slate-300"
+      >
+        <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-slate-400" aria-hidden="true" />
+        <Laptop className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+        <span className="hidden whitespace-nowrap xl:inline">本地連線中…</span>
+      </button>
+    )
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={onOpenModal}
+      title="未偵測到本地代理。點擊下載安裝包，讓學生電腦本地編譯分流伺服器負載！"
+      className="group inline-flex items-center gap-1.5 rounded-full border border-slate-800 bg-slate-900/80 px-2.5 py-1.5 text-xs font-medium text-slate-400 transition-colors hover:border-slate-700 hover:bg-slate-800 hover:text-slate-200"
+    >
+      <Download className="h-3.5 w-3.5 shrink-0 text-slate-500 group-hover:text-sky-300" aria-hidden="true" />
+      <span className="hidden whitespace-nowrap lg:inline">本地加速包</span>
+      <span className="lg:hidden">加速包</span>
     </button>
   )
 }
@@ -264,77 +316,82 @@ export interface HeaderProps {
 export function Header({ activeTab, onTabChange, onSignIn }: HeaderProps) {
   const { health, checkHealth } = useWorkspace()
   const { user, ready } = useAuth()
+  const [agentModalOpen, setAgentModalOpen] = useState(false)
 
   return (
-    <header className="sticky top-0 z-30 border-b border-slate-800/80 bg-slate-950/85 backdrop-blur supports-[backdrop-filter]:bg-slate-950/70">
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-3 py-2.5 sm:px-4">
-        {/* Branding ------------------------------------------------------ */}
-        <div className="flex items-center gap-2.5">
-          <span className="grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br from-sky-500 via-indigo-500 to-fuchsia-500 shadow-lg shadow-indigo-950/60">
-            <SquareTerminal className="h-5 w-5 text-white" strokeWidth={2.2} aria-hidden="true" />
-          </span>
-          <div className="leading-tight">
-            <div className="flex items-baseline gap-2">
-              <span className="text-base font-semibold tracking-tight text-white">CodingPass</span>
-              <span className="hidden rounded bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-slate-400 lg:inline">
-                C/C++ judge
-              </span>
+    <>
+      <header className="sticky top-0 z-30 border-b border-slate-800/80 bg-slate-950/85 backdrop-blur supports-[backdrop-filter]:bg-slate-950/70">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-3 py-2.5 sm:px-4">
+          {/* Branding ------------------------------------------------------ */}
+          <div className="flex items-center gap-2.5">
+            <span className="grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br from-sky-500 via-indigo-500 to-fuchsia-500 shadow-lg shadow-indigo-950/60">
+              <SquareTerminal className="h-5 w-5 text-white" strokeWidth={2.2} aria-hidden="true" />
+            </span>
+            <div className="leading-tight">
+              <div className="flex items-baseline gap-2">
+                <span className="text-base font-semibold tracking-tight text-white">CodingPass</span>
+                <span className="hidden rounded bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-slate-400 lg:inline">
+                  C/C++ judge
+                </span>
+              </div>
+              <p className="hidden text-[11px] text-slate-400 sm:block">
+                Sandbox runner · problem bank · classrooms
+              </p>
             </div>
-            <p className="hidden text-[11px] text-slate-400 sm:block">
-              Sandbox runner · problem bank · classrooms
-            </p>
+          </div>
+
+          {/* Tabs ---------------------------------------------------------- */}
+          <nav aria-label="Sections" className="-mx-1 flex min-w-0 flex-1 items-center gap-1 overflow-x-auto px-1">
+            {APP_TABS.map((tab) => {
+              const active = tab.id === activeTab
+              const Icon = tab.Icon
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => onTabChange(tab.id)}
+                  aria-current={active ? 'page' : undefined}
+                  title={tab.hint}
+                  className={`inline-flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
+                    active
+                      ? 'bg-sky-500/20 text-sky-200 ring-1 ring-inset ring-sky-400/50'
+                      : 'text-slate-400 hover:bg-slate-800/80 hover:text-slate-200'
+                  }`}
+                >
+                  <span aria-hidden="true">{tab.emoji}</span>
+                  <Icon className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span className="whitespace-nowrap">{tab.label}</span>
+                </button>
+              )
+            })}
+          </nav>
+
+          {/* Right hand side ----------------------------------------------- */}
+          <div className="flex items-center gap-2">
+            {!ready && !user ? (
+              <span className="hidden rounded-md border border-slate-700/70 bg-slate-900/70 px-2 py-1 font-mono text-[10px] text-slate-500 md:inline">
+                restoring session…
+              </span>
+            ) : null}
+            {!user ? (
+              <button
+                type="button"
+                onClick={onSignIn}
+                title="Sign in with an account, or use a demo account from the menu"
+                className="inline-flex items-center gap-2 rounded-lg bg-sky-500 px-3 py-1.5 text-xs font-semibold text-slate-950 transition-colors hover:bg-sky-400"
+              >
+                <Zap className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>Sign in</span>
+              </button>
+            ) : null}
+            <LocalAgentPill onOpenModal={() => setAgentModalOpen(true)} />
+            <HealthPill health={health} onHealthCheck={() => void checkHealth()} />
+            <AccountArea onSignIn={onSignIn} />
           </div>
         </div>
-
-        {/* Tabs ---------------------------------------------------------- */}
-        <nav aria-label="Sections" className="-mx-1 flex min-w-0 flex-1 items-center gap-1 overflow-x-auto px-1">
-          {APP_TABS.map((tab) => {
-            const active = tab.id === activeTab
-            const Icon = tab.Icon
-            return (
-              <button
-                key={tab.id}
-                type="button"
-                onClick={() => onTabChange(tab.id)}
-                aria-current={active ? 'page' : undefined}
-                title={tab.hint}
-                className={`inline-flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
-                  active
-                    ? 'bg-sky-500/20 text-sky-200 ring-1 ring-inset ring-sky-400/50'
-                    : 'text-slate-400 hover:bg-slate-800/80 hover:text-slate-200'
-                }`}
-              >
-                <span aria-hidden="true">{tab.emoji}</span>
-                <Icon className="h-3.5 w-3.5" aria-hidden="true" />
-                <span className="whitespace-nowrap">{tab.label}</span>
-              </button>
-            )
-          })}
-        </nav>
-
-        {/* Right hand side ----------------------------------------------- */}
-        <div className="flex items-center gap-2">
-          {!ready && !user ? (
-            <span className="hidden rounded-md border border-slate-700/70 bg-slate-900/70 px-2 py-1 font-mono text-[10px] text-slate-500 md:inline">
-              restoring session…
-            </span>
-          ) : null}
-          {!user ? (
-            <button
-              type="button"
-              onClick={onSignIn}
-              title="Sign in with an account, or use a demo account from the menu"
-              className="inline-flex items-center gap-2 rounded-lg bg-sky-500 px-3 py-1.5 text-xs font-semibold text-slate-950 transition-colors hover:bg-sky-400"
-            >
-              <Zap className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>Sign in</span>
-            </button>
-          ) : null}
-          <HealthPill health={health} onHealthCheck={() => void checkHealth()} />
-          <AccountArea onSignIn={onSignIn} />
-        </div>
-      </div>
-    </header>
+      </header>
+      <AgentModal open={agentModalOpen} onClose={() => setAgentModalOpen(false)} />
+    </>
   )
 }
 

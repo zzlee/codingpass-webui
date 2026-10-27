@@ -31,12 +31,14 @@ import {
 
 import '../monacoSetup'
 import { EDITOR_OPTIONS, EDITOR_THEME } from '../monacoSetup'
+import AITutorPanel from './AITutorPanel'
 import Markdown from './Markdown'
 import ResultPanel from './ResultPanel'
 import { CopyButton, DifficultyBadge, EmptyState, ErrorNotice, MetaChip, Segmented, Spinner } from './ui'
 import { useAuth } from '../authContext'
 import { useCtrlEnter } from '../shortcuts'
 import { useWorkspace } from '../workspaceContext'
+import { useLocalAgent } from '../localAgentContext'
 import api, { ApiError } from '../api'
 import {
   fromSampleRuns,
@@ -88,6 +90,7 @@ export interface ProblemSolverProps {
 export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
   const { user } = useAuth()
   const { getDraft, setDraft } = useWorkspace()
+  const localAgent = useLocalAgent()
 
   const [problem, setProblem] = useState<ProblemDetail | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -200,10 +203,29 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
       for (let index = 0; index < samples.length; index += 1) {
         const testCase = samples[index]
         try {
-          const response: RunResponse = await api.run(
-            { code: current.sources[current.language], language: current.language, stdin: testCase.input },
-            sampleTimeout(detail),
-          )
+          let response: RunResponse
+          if (localAgent.status === 'connected') {
+            try {
+              response = await localAgent.runLocally({
+                code: current.sources[current.language],
+                language: current.language,
+                stdin: testCase.input,
+                timeout_sec: Math.max(1, Math.ceil(detail.time_limit_sec)),
+              })
+            } catch (localErr) {
+              console.warn('Local agent run failed, falling back to server:', localErr)
+              response = await api.run(
+                { code: current.sources[current.language], language: current.language, stdin: testCase.input },
+                sampleTimeout(detail),
+              )
+            }
+          } else {
+            response = await api.run(
+              { code: current.sources[current.language], language: current.language, stdin: testCase.input },
+              sampleTimeout(detail),
+            )
+          }
+
           runs[index] = {
             ...runs[index],
             response,
@@ -218,9 +240,9 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
           break
         }
         setProgress({ done: index + 1, total: samples.length })
-        setReport(fromSampleRuns(runs, 'Sample run - not recorded'))
+        setReport(fromSampleRuns(runs, localAgent.status === 'connected' ? '本地加速執行 (Local Agent) - 未計入成績' : 'Sample run - not recorded'))
       }
-      setReport(fromSampleRuns(runs, 'Sample run - not recorded'))
+      setReport(fromSampleRuns(runs, localAgent.status === 'connected' ? '本地加速執行 (Local Agent) - 未計入成績' : 'Sample run - not recorded'))
     } finally {
       setProgress(null)
       setRunningSamples(false)
@@ -433,11 +455,19 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
                   type="button"
                   onClick={() => void runSamples()}
                   disabled={busy}
-                  title="Run against the sample cases only (Ctrl+Enter). Not recorded."
+                  title={
+                    localAgent.status === 'connected'
+                      ? '由本地 CodingPass Local Agent 即時編譯執行範例測資 (Ctrl+Enter)'
+                      : 'Run against the sample cases only (Ctrl+Enter). Not recorded.'
+                  }
                   className={buttonClass('ghost', 'text-xs')}
                 >
-                  {runningSamples ? <Spinner className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" fill="currentColor" aria-hidden="true" />}
-                  <span>Run Samples</span>
+                  {runningSamples ? (
+                    <Spinner className="h-3.5 w-3.5" />
+                  ) : (
+                    <Play className="h-3.5 w-3.5" fill="currentColor" aria-hidden="true" />
+                  )}
+                  <span>{runningSamples ? 'Running…' : localAgent.status === 'connected' ? 'Run Samples (Local)' : 'Run Samples'}</span>
                 </button>
                 <button
                   type="button"
@@ -507,6 +537,16 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
               </div>
             )}
           </div>
+
+          {/* AI tutor ---------------------------------------------------- */}
+          <AITutorPanel
+            code={code}
+            language={language}
+            status={report?.verdict}
+            compileOutput={report?.compileOutput}
+            problemId={problem.id}
+            compact
+          />
         </section>
       </div>
     </div>

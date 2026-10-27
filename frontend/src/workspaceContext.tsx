@@ -81,7 +81,7 @@ interface WorkspaceContextValue extends WorkspaceState {
   response: RunResponse | null
   running: boolean
   transportError: string | null
-  runCode: () => Promise<void>
+  runCode: (customRunner?: (req: RunRequest) => Promise<RunResponse>) => Promise<void>
 
   // Judge liveness ---------------------------------------------------------
   health: BackendHealth
@@ -182,7 +182,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     setTransportError(null)
   }, [patch])
 
-  const runCode = useCallback(async (): Promise<void> => {
+  const runCode = useCallback(async (customRunner?: (req: RunRequest) => Promise<RunResponse>): Promise<void> => {
     // Synchronous guard: two key presses in the same tick must not double-post.
     if (runningRef.current) return
     runningRef.current = true
@@ -197,7 +197,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     }
 
     try {
-      setResponse(await api.run(body, RUN_TIMEOUT_MS))
+      const runner = customRunner ?? ((b: RunRequest) => api.run(b, RUN_TIMEOUT_MS))
+      setResponse(await runner(body))
     } catch (error) {
       setResponse(null)
       setTransportError(describeRunFailure(error))

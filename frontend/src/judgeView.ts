@@ -10,7 +10,16 @@
  * Both are normalised into `JudgeReportView` so the panel - and its verdict
  * wording - is identical for a trial run and a graded submission.
  */
-import type { CaseVerdict, HiddenSummary, RunResponse, SubmissionResult, TestCasePublic, Verdict } from './types'
+import type {
+  CaseVerdict,
+  HiddenSummary,
+  PatchProbeReport,
+  RubricScores,
+  RunResponse,
+  SubmissionResult,
+  TestCasePublic,
+  Verdict,
+} from './types'
 
 /** One test case row in the result panel. */
 export interface CaseRowView {
@@ -23,6 +32,7 @@ export interface CaseRowView {
   passed: boolean
   status: Verdict
   timeMs: number
+  presentationWarning?: boolean
   input: string | null
   expected: string | null
   got: string | null
@@ -51,6 +61,13 @@ export interface JudgeReportView {
   createdAt: string | null
   submissionId: number | null
   language: string
+
+  /* -- Stage 4 Rubric Breakdown & Formatting Warnings -- */
+  rubric?: RubricScores
+  presentationWarning?: boolean
+  wordingPass?: boolean
+  wordingViolations?: string[]
+  patchProbe?: PatchProbeReport | null
 }
 
 /** Map a graded submission to the panel view model. */
@@ -71,6 +88,7 @@ export function fromSubmissionResult(result: SubmissionResult): JudgeReportView 
       passed: verdict.passed,
       status: verdict.status,
       timeMs: verdict.execution_time_ms,
+      presentationWarning: verdict.presentation_warning,
       input: verdict.input,
       expected: verdict.expected_output,
       got: verdict.stdout,
@@ -96,6 +114,11 @@ export function fromSubmissionResult(result: SubmissionResult): JudgeReportView 
     createdAt: null,
     submissionId: result.submission_id,
     language: result.language,
+    rubric: result.rubric,
+    presentationWarning: result.presentation_warning,
+    wordingPass: result.wording_pass,
+    wordingViolations: result.wording_violations,
+    patchProbe: result.patch_probe,
   }
 }
 

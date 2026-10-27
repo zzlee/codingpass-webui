@@ -54,23 +54,28 @@ See ``compiler.py`` for the sandbox limits (timeout, memory, output size).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
 import secrets
+import shutil
+import tempfile
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Annotated, Literal, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
-from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, field_validator
+from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, ValidationError, field_validator
 from sqlalchemy import case, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload, selectinload
 from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
 try:  # package-style launch: `uvicorn backend.main:app`
     from .compiler import (
@@ -96,6 +101,52 @@ except ImportError:  # flat launch: `uvicorn main:app` / `python main.py`
     )
 
 try:  # package-style launch: `uvicorn backend.main:app`
+    from .ai_tutor import (
+        AI_PROVIDER,
+        HEURISTIC_MODEL_NAME,
+        VLLM_BASE_URL,
+        VLLM_MODEL,
+        analyze_code,
+        check_ai_status,
+    )
+except ImportError:  # flat launch: `uvicorn main:app` / `python main.py`
+    from ai_tutor import (  # type: ignore[no-redef]
+        AI_PROVIDER,
+        HEURISTIC_MODEL_NAME,
+        VLLM_BASE_URL,
+        VLLM_MODEL,
+        analyze_code,
+        check_ai_status,
+    )
+
+try:  # package-style launch: `uvicorn backend.main:app`
+    from .patch_probe import (
+        BROKEN_ALGORITHM_SCORE,
+        CLEAN_PASS_SCORE,
+        MAX_PROBE_RUNS,
+        MAX_PROBE_SECONDS,
+        PATCHED_PASS_SCORE,
+        probe_minimal_patch,
+    )
+    from .plagiarism import compute_similarity_pairs
+    from .problem_pack import ProblemPackError, parse_problem_pack
+    from .teda_engine import DualRunError, TeDaError, compare_outputs
+    from .wording_rules import check_wording_rules
+except ImportError:  # flat launch: `uvicorn main:app` / `python main.py`
+    from patch_probe import (  # type: ignore[no-redef]
+        BROKEN_ALGORITHM_SCORE,
+        CLEAN_PASS_SCORE,
+        MAX_PROBE_RUNS,
+        MAX_PROBE_SECONDS,
+        PATCHED_PASS_SCORE,
+        probe_minimal_patch,
+    )
+    from plagiarism import compute_similarity_pairs  # type: ignore[no-redef]
+    from problem_pack import ProblemPackError, parse_problem_pack  # type: ignore[no-redef]
+    from teda_engine import DualRunError, TeDaError, compare_outputs  # type: ignore[no-redef]
+    from wording_rules import check_wording_rules  # type: ignore[no-redef]
+
+try:  # package-style launch: `uvicorn backend.main:app`
     from .auth import (
         create_access_token,
         get_current_user,
@@ -105,7 +156,7 @@ try:  # package-style launch: `uvicorn backend.main:app`
         require_roles,
         verify_password_for_login,
     )
-    from .database import init_db
+    from .database import init_db, utcnow
     from .models import (
         Classroom,
         ClassroomMembership,
@@ -130,7 +181,7 @@ except ImportError:  # flat launch: `uvicorn main:app` / `python main.py`
         require_roles,
         verify_password_for_login,
     )
-    from database import init_db  # type: ignore[no-redef]
+    from database import init_db, utcnow  # type: ignore[no-redef]
     from models import (  # type: ignore[no-redef]
         Classroom,
         ClassroomMembership,
@@ -180,6 +231,68 @@ MAX_PAGE_SIZE = 200
 #: without ``I``/``O`` and digits without ``0``/``1`` (whiteboard-friendly).
 INVITE_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 INVITE_CODE_LENGTH = 6
+
+# --------------------------------------------------------------------------- #
+# Problem-pack import + Stage 3/4 configuration
+# --------------------------------------------------------------------------- #
+
+#: Largest uploaded pack archive, in bytes (``POST /api/problems/import-pack``).
+MAX_PACK_UPLOAD_BYTES = max(1024, int(os.environ.get("MAX_PACK_UPLOAD_BYTES", str(64 * 1024 * 1024))))
+
+
+def _pack_pdf_dir() -> Path:
+    """Where a statement PDF extracted from an uploaded archive is persisted."""
+    return Path(
+        os.environ.get("PROBLEM_PACK_PDF_DIR", "").strip()
+        or (Path(__file__).resolve().parent / "problem_packs")
+    )
+
+
+def _pack_allowed_roots() -> list[Path]:
+    """Directories a teacher may import a pack *folder* from.
+
+    ``PROBLEM_PACK_ROOTS`` is a comma separated allow-list of server directories.
+    An upload carries its own pack, so the allow-list only guards the
+    ``directory_path`` form of ``POST /api/problems/import-pack``: without it a
+    teacher account could point the importer at any readable folder on the
+    server. Left unset the check is disabled (the shape any single-teacher
+    classroom server already has), and every import logs the resolved path.
+    """
+    raw = os.environ.get("PROBLEM_PACK_ROOTS", "").strip()
+    if not raw:
+        return []
+    roots: list[Path] = []
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            roots.append(Path(entry).resolve())
+        except OSError:  # pragma: no cover - a malformed root is simply ignored
+            logger.warning("ignoring unreadable PROBLEM_PACK_ROOTS entry %r", entry)
+    return roots
+
+
+PACK_ALLOWED_ROOTS: list[Path] = _pack_allowed_roots()
+
+#: Default escalation threshold of the plagiarism screen.
+PLAGIARISM_DEFAULT_THRESHOLD = 0.85
+
+#: Most submissions one plagiarism screen compares. Similarity is all-pairs, so
+#: this bounds the endpoint's worst case on a very large class; the response says
+#: ``truncated: true`` when it stopped early.
+PLAGIARISM_MAX_SUBMISSIONS = max(
+    2, int(os.environ.get("PLAGIARISM_MAX_SUBMISSIONS", "200"))
+)
+
+#: The 100-point teaching rubric. ``sample``/``random`` are scaled by how many
+#: cases actually exist; see :func:`_build_rubric`.
+RUBRIC_COMPILE_POINTS = 10.0
+RUBRIC_SAMPLE_POINTS = 10.0
+RUBRIC_RANDOM_POINTS = 30.0
+RUBRIC_LOGIC_POINTS = 40.0
+RUBRIC_QUALITY_POINTS = 10.0
+
 
 # Patterns are unanchored on purpose: every use site calls ``fullmatch``, which
 # cannot be fooled by the trailing-newline quirk of ``$``.
@@ -574,7 +687,11 @@ class ProblemCreate(BaseModel):
 
 
 class ProblemSummary(BaseModel):
-    """Compact problem row used in lists (no description, no test cases)."""
+    """Compact problem row used in lists (no description, no test cases).
+
+    The ``has_*`` flags expose only *whether* a problem pack carries a given
+    attachment - never the reference source, the rule text or the PDF path.
+    """
 
     id: int
     title: str
@@ -587,6 +704,11 @@ class ProblemSummary(BaseModel):
     created_at: UtcDatetime
     sample_count: int = 0
     hidden_count: int = 0
+    problem_code: Optional[str] = None
+    has_ref_code: bool = False
+    has_wording_rules: bool = False
+    has_random_generator: bool = False
+    has_statement_pdf: bool = False
 
 
 # ``ClassroomDetail`` forward-references this model, so complete the schema now.
@@ -604,12 +726,88 @@ class ProblemDetail(ProblemSummary):
     starter_code_c: str = ""
     starter_code_cpp: str = ""
     test_cases: list[TestCasePublic] = Field(default_factory=list)
+    pdf_path: Optional[str] = Field(
+        default=None, description="Filesystem path to the statement PDF (if available)."
+    )
+    wording_rules: Optional[str] = Field(
+        default=None,
+        description=(
+            "TeDa-Wording rule text. Present only for the problem's own teacher "
+            "or an admin: students must be able to *satisfy* the rules, and the "
+            "verdict already quotes any rule they broke."
+        ),
+    )
 
 
 class ProblemListResponse(BaseModel):
     total: int
     count: int
     problems: list[ProblemSummary]
+
+
+class ImportPackRequest(BaseModel):
+    """Body of ``POST /api/problems/import-pack`` (JSON form).
+
+    Exactly one of :attr:`directory_path` (a pack folder or ``.zip`` already on
+    the server) and an uploaded ``file`` part (multipart form) must be supplied.
+    """
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "directory_path": "/home/zzlee/vibecoding/codingpass-tests/P1001_反轉單字",
+                    "classroom_id": 1,
+                    "generate_hidden": True,
+                    "num_random": 30,
+                }
+            ]
+        }
+    )
+
+    directory_path: Optional[str] = Field(
+        default=None,
+        max_length=1024,
+        description=(
+            "Server-side path to a `Pxxxx_題名` pack folder or a .zip of one. "
+            "Restricted to PROBLEM_PACK_ROOTS when that variable is set."
+        ),
+    )
+    classroom_id: Optional[int] = Field(
+        default=None, ge=1,
+        description="Publish to this class; omit to keep the problem in your bank.",
+    )
+    generate_hidden: bool = Field(
+        default=True,
+        description="Run the TeDa generator x reference dual run to build hidden cases.",
+    )
+    num_random: int = Field(
+        default=30, ge=1, le=MAX_TEST_CASES,
+        description="How many random hidden cases to generate.",
+    )
+    seed: int = Field(
+        default=42,
+        description=(
+            "Base seed of the TeDa generator (case i uses seed*1000+i). Keep the "
+            "default to reproduce the same hidden case set as the offline sandbox."
+        ),
+    )
+
+    @field_validator("directory_path")
+    @classmethod
+    def _normalise_path(cls, value: Optional[str]) -> Optional[str]:
+        text = (value or "").strip()
+        return text or None
+
+
+class ProblemImportResult(ProblemDetail):
+    """``ProblemDetail`` plus what the pack importer actually did."""
+
+    pack_name: str = ""
+    pack_source: str = Field(default="", description="'dir' or 'zip'.")
+    sample_case_count: int = 0
+    random_case_count: int = 0
+    warnings: list[str] = Field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #
@@ -659,6 +857,13 @@ class CaseVerdict(BaseModel):
     exit_code: Optional[int] = None
     signal_name: Optional[str] = None
     truncated: bool = False
+    presentation_warning: bool = Field(
+        default=False,
+        description=(
+            "This case passed, but only because the judge ignores trailing "
+            "whitespace: a byte-strict judge would answer Presentation Error."
+        ),
+    )
     input: Optional[str] = None
     expected_output: Optional[str] = None
     stdout: Optional[str] = None
@@ -671,6 +876,38 @@ class HiddenSummary(BaseModel):
     total: int = 0
     passed: int = 0
     failed: int = 0
+
+
+class RubricScores(BaseModel):
+    """The 100-point teaching rubric, as measured for one submission.
+
+    ``score`` on a submission stays the platform-style pass percentage; this is
+    the breakdown the offline rubric defines (``compile 10 + sample 10 +
+    random 30 + logic 40 + quality 10``), so a student who was one semicolon
+    away from a working program is not reported as a zero.
+    """
+
+    compile_score: float = Field(default=0.0, ge=0.0, le=RUBRIC_COMPILE_POINTS)
+    sample_score: float = Field(default=0.0, ge=0.0, le=RUBRIC_LOGIC_POINTS)
+    random_score: float = Field(default=0.0, ge=0.0, le=RUBRIC_RANDOM_POINTS)
+    logic_score: float = Field(default=0.0, ge=0.0, le=RUBRIC_LOGIC_POINTS)
+    quality_score: float = Field(default=0.0, ge=0.0, le=RUBRIC_QUALITY_POINTS)
+    total: float = Field(default=0.0, ge=0.0, le=100.0, description="Sum, clamped to 100.")
+
+
+class PatchProbeReport(BaseModel):
+    """What :func:`patch_probe.probe_minimal_patch` concluded about a submission."""
+
+    needed: bool
+    patch_success: bool
+    probed_logic_score: float
+    details: str
+    baseline_status: str = ""
+    applied_fixes: list[str] = Field(default_factory=list)
+    attempted_fixes: list[str] = Field(default_factory=list)
+    cases_tested: int = 0
+    cases_passed: int = 0
+    stopped_early: bool = False
 
 
 class SubmissionResult(BaseModel):
@@ -701,6 +938,29 @@ class SubmissionResult(BaseModel):
     results: list[CaseVerdict] = Field(default_factory=list)
     hidden_summary: HiddenSummary = Field(default_factory=HiddenSummary)
 
+    # -- Stage 3 / 4: rubric, formatting and wording --------------------------- #
+    rubric: RubricScores = Field(default_factory=RubricScores)
+    presentation_warning: bool = Field(
+        default=False,
+        description="Passed, but only under the whitespace-tolerant judge (PE).",
+    )
+    wording_pass: bool = Field(
+        default=True,
+        description="True when the problem declares no wording rules at all.",
+    )
+    wording_violations: list[str] = Field(
+        default_factory=list,
+        description="Human-readable violated `#term`/`#root`/`#regex` rules.",
+    )
+    patch_probe: Optional[PatchProbeReport] = Field(
+        default=None,
+        description=(
+            "Minimal Patch Probe result. Only present when the submission did "
+            "not compile or did not pass every case: an accepted submission "
+            "needs no probe."
+        ),
+    )
+
 
 class SubmissionOut(BaseModel):
     """Row of ``GET /api/submissions``."""
@@ -719,6 +979,38 @@ class SubmissionOut(BaseModel):
     execution_time_ms: float
     created_at: UtcDatetime
 
+    # -- Phase 4: AI + teacher review (``None`` until somebody reviews it) --- #
+    ai_feedback: Optional[str] = Field(
+        default=None, description="Markdown review produced by the AI tutor."
+    )
+    ai_suggested_score: Optional[float] = Field(
+        default=None, description="Advisory score suggested by the AI (0-100)."
+    )
+    ai_model: Optional[str] = Field(
+        default=None, description="Model that produced ``ai_feedback``."
+    )
+    ai_reviewed_at: Optional[UtcDatetime] = None
+    teacher_feedback: Optional[str] = Field(
+        default=None, description="Teacher's written feedback."
+    )
+    teacher_score: Optional[float] = Field(
+        default=None, description="Teacher's manual score (0-100)."
+    )
+    reviewed_by_id: Optional[int] = Field(
+        default=None, description="Teacher/admin account that graded the attempt."
+    )
+    reviewed_at: Optional[UtcDatetime] = None
+
+    # -- Stage 4: teaching rubric --------------------------------------------- #
+    rubric_total: float = Field(
+        default=0.0,
+        description=(
+            "Sum of the five rubric parts (compile/sample/random/logic/quality). "
+            "``score`` stays the pass percentage; this is the 100-point rubric. "
+            "Attempts recorded before Stage 4 read 0.0."
+        ),
+    )
+
 
 class SubmissionListResponse(BaseModel):
     total: int
@@ -730,6 +1022,149 @@ class SubmissionDetailOut(SubmissionOut):
     """One recorded attempt, including the submitted source for review."""
 
     code: str
+
+    # -- Stage 3 / 4: rubric breakdown and formatting flags -------------------- #
+    rubric: RubricScores = Field(default_factory=RubricScores)
+    presentation_warning: bool = False
+    wording_pass: bool = True
+    wording_violations: list[str] = Field(default_factory=list)
+
+
+# --------------------------------------------------------------------------- #
+# Stage 3: plagiarism screen schemas
+# --------------------------------------------------------------------------- #
+
+
+class PlagiarismPair(BaseModel):
+    """One suspicious pair, as measured by :mod:`plagiarism`.
+
+    ``ast_similarity`` is the structural number: identifiers renamed, comments
+    and includes stripped, ``for``/``while`` re-spelling and literal values
+    normalised away, so renaming ``count`` to ``cnt`` does not lower it.
+    ``token_similarity`` keeps the real identifier names, which is what tells a
+    reviewer whether two students shared a keyboard or merely shared a lecture.
+    ``exemption`` explains a ``flagged=False`` pair: both submissions match the
+    teacher's reference solution, so the match is explained by the model answer
+    (Reference Baseline Subtraction) instead of by copying.
+    """
+
+    student_a: str
+    student_b: str
+    submission_id_a: int
+    submission_id_b: int
+    language: str = ""
+    combined_similarity: float = Field(ge=0.0, le=1.0)
+    ast_similarity: float = Field(ge=0.0, le=1.0)
+    token_similarity: float = Field(ge=0.0, le=1.0)
+    ngram_jaccard: float = Field(ge=0.0, le=1.0)
+    ref_similarity_a: Optional[float] = None
+    ref_similarity_b: Optional[float] = None
+    flagged: bool = False
+    exemption: Optional[str] = None
+
+
+class PlagiarismReport(BaseModel):
+    """Result of one structural-similarity screen over a problem's submissions."""
+
+    problem_id: int
+    problem_title: str = ""
+    problem_code: Optional[str] = None
+    classroom_id: int
+    classroom_name: str = ""
+    threshold: float = Field(description="Escalation cut-off this screen used.")
+    reference_available: bool = Field(
+        default=False,
+        description=(
+            "Whether the problem carries a reference solution, i.e. whether "
+            "Reference Baseline Subtraction could run at all."
+        ),
+    )
+    languages: list[str] = Field(
+        default_factory=list,
+        description="Languages screened; submissions of different languages are never compared.",
+    )
+    submissions_compared: int = 0
+    students_compared: int = 0
+    pair_count: int = Field(default=0, description="Pairs at or above the threshold.")
+    flagged_count: int = 0
+    exempt_count: int = Field(
+        default=0, description="Threshold hits cleared as 'both wrote the model answer'."
+    )
+    skipped_trivial: int = Field(
+        default=0,
+        description=(
+            "Submissions left out because they are empty, whitespace-only or "
+            "untouched starter scaffolding: comparing scaffolding reports noise."
+        ),
+    )
+    truncated: bool = Field(
+        default=False,
+        description=(
+            f"True when more submissions existed than the screen compares "
+            f"(PLAGIARISM_MAX_SUBMISSIONS), so the pair list is not exhaustive."
+        ),
+    )
+    pairs: list[PlagiarismPair] = Field(default_factory=list)
+
+
+# --------------------------------------------------------------------------- #
+# Phase 4: AI tutor schemas
+# --------------------------------------------------------------------------- #
+
+
+class AIStatusResponse(BaseModel):
+    """Reachability of the configured vLLM tutor."""
+
+    available: bool
+    provider: str
+    model: str
+    base_url: str
+    detail: str = ""
+
+
+class AIAnalyzeRequest(BaseModel):
+    """Ad-hoc review request (Run panel / teacher preview, nothing persisted)."""
+
+    code: str = Field(..., min_length=1, max_length=MAX_SOURCE_CHARS)
+    language: LanguageLiteral
+    status: Optional[str] = Field(
+        default="unknown", description="Judge verdict for this source, if known."
+    )
+    compile_output: Optional[str] = ""
+    stderr: Optional[str] = ""
+    problem_id: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Attach statement context. Requires authentication; test cases are never sent.",
+    )
+
+
+class AIAnalyzeResponse(BaseModel):
+    """Structured review produced by :func:`ai_tutor.analyze_code`."""
+
+    summary: str
+    error_analysis: str
+    time_complexity: str
+    space_complexity: str
+    suggestions: list[str]
+    suggested_score: float
+    feedback_markdown: str
+    model: str
+    ai_powered: bool
+    detail: str = ""
+
+
+class SubmissionAIReviewResponse(SubmissionDetailOut):
+    """A submission refreshed after an AI review was stored on it."""
+
+    analysis: AIAnalyzeResponse
+
+
+class TeacherReviewRequest(BaseModel):
+    """Manual grading of one submission by a teacher/admin."""
+
+    teacher_score: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+    teacher_feedback: Optional[str] = Field(default=None, max_length=10000)
 
 
 # --------------------------------------------------------------------------- #
@@ -806,7 +1241,7 @@ app.add_middleware(
     allow_origins=origins,
     allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=origins != ["*"],
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
     # 'Authorization' carries the JWT from the Vite dev server on :5173; without
     # it the browser blocks every authenticated cross-origin request.
     allow_headers=["Content-Type", "Authorization"],
@@ -876,7 +1311,71 @@ async def config() -> dict:
         "memory_limit_bounds": [MIN_MEMORY_LIMIT_MB, MAX_MEMORY_LIMIT_MB],
         "roles": list(Role.ALL),
         "difficulties": list(Difficulty.ALL),
+        # -- Stage 3/4: what the teacher-facing screens need to label --------- #
+        "rubric_points": {
+            "compile": RUBRIC_COMPILE_POINTS,
+            "sample": RUBRIC_SAMPLE_POINTS,
+            "random": RUBRIC_RANDOM_POINTS,
+            "logic": RUBRIC_LOGIC_POINTS,
+            "quality": RUBRIC_QUALITY_POINTS,
+        },
+        "plagiarism_default_threshold": PLAGIARISM_DEFAULT_THRESHOLD,
+        "patch_probe": {
+            "max_probe_runs": MAX_PROBE_RUNS,
+            "max_probe_seconds": MAX_PROBE_SECONDS,
+            "clean_pass_score": CLEAN_PASS_SCORE,
+            "patched_pass_score": PATCHED_PASS_SCORE,
+            "broken_algorithm_score": BROKEN_ALGORITHM_SCORE,
+        },
+        "pack_upload_bytes": MAX_PACK_UPLOAD_BYTES,
+        "pack_roots_restricted": bool(PACK_ALLOWED_ROOTS),
+        # Configuration only: whether the tutor is actually *reachable* needs a
+        # live probe, which is what ``GET /api/ai/status`` is for.
+        "ai": {
+            "provider": AI_PROVIDER,
+            "model": VLLM_MODEL,
+            "base_url": VLLM_BASE_URL,
+            "heuristic_model": HEURISTIC_MODEL_NAME,
+            "status_path": "/api/ai/status",
+        },
+        "local_agent": {
+            "default_port": 8765,
+            "websocket_url": "ws://127.0.0.1:8765",
+            "download_url": "/api/agent/download",
+            "version": "1.0.0",
+        },
     }
+
+
+@app.get("/api/agent/info")
+async def agent_info() -> dict:
+    """Connection info for the CodingPass Local Agent."""
+    return {
+        "host": "127.0.0.1",
+        "port": 8765,
+        "websocket_url": "ws://127.0.0.1:8765",
+        "download_url": "/api/agent/download",
+        "version": "1.0.0",
+    }
+
+
+@app.get("/api/agent/download")
+async def download_agent_package():
+    """Download a standalone zip containing the Local Agent runner."""
+    agent_dir = Path(__file__).resolve().parent.parent / "local_agent"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        if agent_dir.is_dir():
+            for fname in ("agent.py", "run_agent.sh", "run_agent.bat", "README.md"):
+                fpath = agent_dir / fname
+                if fpath.is_file():
+                    zf.write(fpath, arcname=f"codingpass-agent/{fname}")
+    buf.seek(0)
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="codingpass-agent.zip"'},
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -934,6 +1433,9 @@ class CaseOutcome:
     expected_output: str
     stdout: str
     stderr: str
+    #: Ran and was judged correct, but is not byte-identical (trailing spaces,
+    #: stray blank lines): the TeDa judge trims those, a strict judge PE's them.
+    presentation_warning: bool = False
 
 
 @dataclass
@@ -951,6 +1453,18 @@ class JudgeReport:
 
     def slowest_ms(self) -> float:
         return max((outcome.execution_time_ms for outcome in self.outcomes), default=0.0)
+
+    def sample_outcomes(self) -> list[CaseOutcome]:
+        return [outcome for outcome in self.outcomes if outcome.is_sample]
+
+    def hidden_outcomes(self) -> list[CaseOutcome]:
+        return [outcome for outcome in self.outcomes if not outcome.is_sample]
+
+    def presentation_warning(self) -> bool:
+        """True when any *passing* case only passed thanks to trimmed output."""
+        return any(
+            outcome.passed and outcome.presentation_warning for outcome in self.outcomes
+        )
 
     def aggregate_status(self, total_count: int) -> str:
         """Collapse the per-case verdicts into the stored submission verdict.
@@ -1015,9 +1529,17 @@ def _judge_all_cases(
         report.compile_time_ms = max(report.compile_time_ms, result.compile_time_ms)
 
         expected = case_row.expected_output or ""
+        # Two comparison layers, mirroring the offline judge:
+        #   * pass/fail uses :func:`_normalize_output`, the platform's
+        #     whitespace-tolerant rule (``trim`` + ``trimEnd``),
+        #   * :func:`compare_outputs` adds the byte-strict layer, and the gap
+        #     between the two *is* the presentation warning - the answer is
+        #     correct, the layout is not what the statement asked for.
+        comparison = compare_outputs(result.stdout, expected)
         passed = result.status == Status.SUCCESS and _normalize_output(
             result.stdout
         ) == _normalize_output(expected)
+        presentation_warning = bool(passed and not comparison["strict_match"])
         if result.status == Status.SUCCESS:
             case_status = SubmissionStatus.ACCEPTED if passed else SubmissionStatus.WRONG_ANSWER
         else:
@@ -1038,6 +1560,7 @@ def _judge_all_cases(
                 expected_output=expected,
                 stdout=result.stdout,
                 stderr=result.stderr,
+                presentation_warning=presentation_warning,
             )
         )
     return report
@@ -1060,11 +1583,226 @@ def _case_verdict(outcome: CaseOutcome, reveal_hidden: bool) -> CaseVerdict:
         exit_code=outcome.exit_code,
         signal_name=outcome.signal_name,
         truncated=outcome.truncated,
+        # A hidden case's PE flag says nothing about its data, but the flag only
+        # means anything next to the output that caused it, so it stays with the
+        # rest of the case detail.
+        presentation_warning=bool(outcome.presentation_warning and visible),
         input=outcome.stdin if visible else None,
         expected_output=outcome.expected_output if visible else None,
         stdout=outcome.stdout if visible else None,
         stderr=(_clip(outcome.stderr) if visible else "") or None,
     )
+
+
+def _probe_cases(cases: list[TestCase], limit: int = 3) -> list[dict[str, str]]:
+    """Pick the public cases the Minimal Patch Probe is allowed to run.
+
+    Only sample cases: the probe recompiles and reruns a repaired program, and
+    feeding it hidden expected outputs would turn a rescue heuristic into an
+    oracle. A problem whose cases are all hidden falls back to its first case,
+    which still only proves the repaired build *runs*.
+    """
+    picked = [case for case in cases if case.is_sample][:limit]
+    if not picked and cases:
+        picked = cases[:1]
+    return [
+        {"input": case.input or "", "expected_output": case.expected_output or ""}
+        for case in picked
+    ]
+
+
+def _probe_public(probe: Optional[dict]) -> Optional[PatchProbeReport]:
+    """Project a probe result onto the wire format.
+
+    ``patched_code`` and ``compile_output`` are deliberately **dropped**: a
+    student who was one semicolon short of a working program must not receive
+    the working program back from the grading response.
+    """
+    if not probe:
+        return None
+    return PatchProbeReport(
+        needed=bool(probe.get("needed")),
+        patch_success=bool(probe.get("patch_success")),
+        probed_logic_score=float(probe.get("probed_logic_score") or 0.0),
+        details=str(probe.get("details") or ""),
+        baseline_status=str(probe.get("baseline_status") or ""),
+        applied_fixes=[str(name) for name in probe.get("applied_fixes") or []],
+        attempted_fixes=[str(name) for name in probe.get("attempted_fixes") or []],
+        cases_tested=int(probe.get("cases_tested") or 0),
+        cases_passed=int(probe.get("cases_passed") or 0),
+        stopped_early=bool(probe.get("stopped_early")),
+    )
+
+
+@dataclass
+class Rubric:
+    """The 100-point teaching rubric for one graded submission.
+
+    Mirrors ``評分系統計劃書_v1.md`` §6: ``compile 10 + sample 10 + random 30 +
+    logic 40 + quality 10``. See :func:`_build_rubric` for how each part is
+    measured.
+    """
+
+    compile_score: float = 0.0
+    sample_score: float = 0.0
+    random_score: float = 0.0
+    logic_score: float = 0.0
+    quality_score: float = 0.0
+
+    @property
+    def total(self) -> float:
+        return round(
+            min(100.0,
+                max(
+                    0.0,
+                    self.compile_score
+                    + self.sample_score
+                    + self.random_score
+                    + self.logic_score
+                    + self.quality_score,
+                ),
+            ),
+            2,
+        )
+
+    def as_dict(self) -> dict[str, float]:
+        return {
+            "compile_score": self.compile_score,
+            "sample_score": self.sample_score,
+            "random_score": self.random_score,
+            "logic_score": self.logic_score,
+            "quality_score": self.quality_score,
+            "total": self.total,
+        }
+
+
+def _build_rubric(
+    report: JudgeReport,
+    verdict: str,
+    *,
+    presentation_warning: bool,
+    wording_pass: bool,
+    probe: Optional[dict] = None,
+    trial_run: bool = False,
+) -> Rubric:
+    """Turn one :class:`JudgeReport` into the five rubric parts.
+
+    Rules, in the order they are applied:
+
+    ``compile_score`` (10)
+        ``10.0`` when the source built, else ``0.0``. A build failure zeroes the
+        two case bands as well, exactly like the offline pipeline.
+    ``sample_score`` (10)
+        Passed public samples scaled to 10 - or to 40 when the problem has no
+        hidden cases at all, so the rubric still adds up to 100 and a sample-only
+        problem is not capped at 70.
+    ``random_score`` (30)
+        Passed hidden cases scaled to 30; ``0.0`` when there are none (the sample
+        band already absorbed them).
+    ``logic_score`` (40)
+        ``40.0`` for an accepted submission. Otherwise the larger of the measured
+        pass ratio (``40 * passed / total``) and the Minimal Patch Probe verdict,
+        with the probe capped at :data:`~patch_probe.PATCHED_PASS_SCORE` so only
+        a fully accepted run reaches 40. A presentation warning caps this band at
+        36 either way. A trial run never probes (the teacher is previewing, not
+        being graded), so a failed trial build scores 0 here.
+    ``quality_score`` (10)
+        Starts at 10; -3 for a wording-rule violation, -1 for compiler warnings,
+        -1 for a case that timed out or crashed, and capped at 5 when nothing
+        built (the rubric's CE ceiling). A presentation warning is *not* charged
+        here: it already cost part of the logic band.
+    """
+    samples = report.sample_outcomes()
+    hidden = report.hidden_outcomes()
+    total_cases = len(report.outcomes)
+    passed_cases = report.passed_count()
+
+    compile_score = 0.0 if report.compile_failed else RUBRIC_COMPILE_POINTS
+
+    samples_passed = sum(1 for outcome in samples if outcome.passed)
+    if hidden:
+        sample_band = RUBRIC_SAMPLE_POINTS
+        random_score = _scale(passed_hidden(hidden), RUBRIC_RANDOM_POINTS, len(hidden))
+    else:
+        # No random band to award: the sample band carries the whole 40 points.
+        sample_band = RUBRIC_SAMPLE_POINTS + RUBRIC_RANDOM_POINTS
+        random_score = 0.0
+    sample_score = _scale(samples_passed, sample_band, len(samples))
+
+    measured = _scale(passed_cases, RUBRIC_LOGIC_POINTS, total_cases)
+    if verdict == SubmissionStatus.ACCEPTED:
+        logic_score = RUBRIC_LOGIC_POINTS
+    else:
+        probed = 0.0
+        if probe and probe.get("patch_success"):
+            probed = min(float(probe.get("probed_logic_score") or 0.0), PATCHED_PASS_SCORE)
+        logic_score = round(max(measured, probed), 2)
+        if report.compile_failed:
+            # Nothing ran: only the probe may award credit above the CE floor.
+            logic_score = round(min(logic_score, PATCHED_PASS_SCORE), 2)
+    if presentation_warning:
+        # A PE answer loses the I/O-format sub-criterion of the logic band. This
+        # is charged once, here, and is why a PE submission lands at 36/40
+        # instead of a full 40 or a bare pass.
+        logic_score = round(min(logic_score, RUBRIC_LOGIC_POINTS - 4.0), 2)
+
+    quality = RUBRIC_QUALITY_POINTS
+    if presentation_warning:
+        quality -= 2.0
+    if not wording_pass:
+        quality -= 3.0
+    statuses = {outcome.status for outcome in report.outcomes}
+    if Status.TIME_LIMIT_EXCEEDED in statuses or Status.RUNTIME_ERROR in statuses:
+        quality -= 1.0
+    if report.compile_failed:
+        quality = min(quality, 5.0)
+    if trial_run and report.compile_failed:
+        quality = min(quality, 5.0)
+    quality_score = round(min(RUBRIC_QUALITY_POINTS, max(0.0, quality)), 2)
+
+    return Rubric(
+        compile_score=round(compile_score, 2),
+        sample_score=round(sample_score, 2),
+        random_score=round(random_score, 2),
+        logic_score=round(logic_score, 2),
+        quality_score=quality_score,
+    )
+
+
+def _scale(passed: int, band: float, total: int) -> float:
+    """``passed / total * band``, ``0.0`` when the band has nothing to measure."""
+    if total <= 0:
+        return 0.0
+    return round(band * passed / total, 2)
+
+
+def passed_hidden(hidden: list[CaseOutcome]) -> int:
+    return sum(1 for outcome in hidden if outcome.passed)
+
+
+#: Keys of the wording verdict that are internal to :mod:`wording_rules`.
+def _wording_json(violations: Optional[list[str]]) -> Optional[str]:
+    """Serialise the human-readable violation list for ``wording_violations``."""
+    if not violations:
+        return None
+    try:
+        return json.dumps(list(violations), ensure_ascii=False)
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return json.dumps([str(item) for item in violations])
+
+
+def _wording_list(stored: Optional[str]) -> list[str]:
+    """Decode ``Submission.wording_violations`` back into a display list."""
+    if not stored:
+        return []
+    try:
+        decoded = json.loads(stored)
+    except ValueError:
+        # A hand-edited row still has to render.
+        return [stored]
+    if isinstance(decoded, list):
+        return [str(item) for item in decoded]
+    return [str(decoded)]
 
 
 # --------------------------------------------------------------------------- #
@@ -1247,6 +1985,11 @@ def _problem_summary(problem: Problem, counts: dict[int, tuple[int, int]]) -> Pr
         created_at=problem.created_at,
         sample_count=samples,
         hidden_count=hidden,
+        problem_code=problem.problem_code,
+        has_ref_code=problem.has_ref_code,
+        has_wording_rules=problem.has_wording_rules,
+        has_random_generator=problem.has_random_generator,
+        has_statement_pdf=problem.has_statement_pdf,
     )
 
 
@@ -1270,9 +2013,15 @@ def _problem_detail(problem: Problem, reveal_hidden: bool) -> ProblemDetail:
         created_at=problem.created_at,
         sample_count=len(problem.sample_test_cases),
         hidden_count=len(problem.hidden_test_cases),
+        problem_code=problem.problem_code,
+        has_ref_code=problem.has_ref_code,
+        has_wording_rules=problem.has_wording_rules,
+        has_random_generator=problem.has_random_generator,
+        has_statement_pdf=problem.has_statement_pdf,
         description=problem.description,
         starter_code_c=problem.starter_code_c,
         starter_code_cpp=problem.starter_code_cpp,
+        pdf_path=problem.pdf_path,
         test_cases=[
             TestCasePublic(
                 id=case_row.id,
@@ -1282,6 +2031,7 @@ def _problem_detail(problem: Problem, reveal_hidden: bool) -> ProblemDetail:
             )
             for case_row in visible_cases
         ],
+        wording_rules=problem.wording_rules if reveal_hidden else None,
     )
 
 
@@ -1802,6 +2552,319 @@ async def add_problem_test_case(
     return _problem_detail(problem, reveal_hidden=True)
 
 
+# --------------------------------------------------------------------------- #
+# Stage 3/4: problem-pack import
+# --------------------------------------------------------------------------- #
+
+
+def _authorised_pack_path(raw: str, teacher: User) -> Path:
+    """Resolve a teacher-supplied pack path, honouring ``PROBLEM_PACK_ROOTS``.
+
+    Reading an arbitrary server directory through the importer would turn a
+    teacher account into a file browser: a pack folder is a path the caller
+    controls, so when the operator configures an allow-list the resolved path has
+    to sit inside one of its roots. The resolved path is always logged, because an
+    import changes what students are graded on.
+    """
+    try:
+        resolved = Path(raw).expanduser().resolve()
+    except OSError as exc:  # pragma: no cover - host path table dependent
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Could not resolve that pack path: {exc}",
+        ) from exc
+
+    if PACK_ALLOWED_ROOTS and not any(
+        resolved == root or root in resolved.parents for root in PACK_ALLOWED_ROOTS
+    ):
+        logger.warning(
+            "teacher %s tried to import a pack from %s, outside PROBLEM_PACK_ROOTS",
+            teacher.id,
+            resolved,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "That path is outside the directories this server imports packs "
+                "from (PROBLEM_PACK_ROOTS). Upload the pack archive instead."
+            ),
+        )
+    return resolved
+
+
+async def _spool_pack_upload(upload: StarletteUploadFile, destination: Path) -> Path:
+    """Stream an uploaded archive to ``destination``, enforcing the size cap.
+
+    The cap is counted while copying rather than trusted from ``Content-Length``:
+    that header is caller-supplied, and an archive that lies about its size would
+    otherwise fill the disk before the importer ever looked at it.
+    """
+    target = destination / (Path(upload.filename or "pack.zip").name or "pack.zip")
+    written = 0
+    try:
+        with target.open("wb") as handle:
+            while chunk := await upload.read(1 << 20):
+                written += len(chunk)
+                if written > MAX_PACK_UPLOAD_BYTES:
+                    raise HTTPException(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail=(
+                            f"Pack archive exceeds the {MAX_PACK_UPLOAD_BYTES}-byte "
+                            "upload limit."
+                        ),
+                    )
+                handle.write(chunk)
+    finally:
+        await upload.close()
+    if not written:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="The uploaded file was empty."
+        )
+    return target
+
+
+@app.post(
+    "/api/problems/import-pack",
+    response_model=ProblemImportResult,
+    status_code=status.HTTP_201_CREATED,
+    summary="Import a CodingPass problem pack (server folder or .zip upload)",
+)
+async def import_problem_pack(
+    request: Request,
+    db: Session = Depends(get_db),
+    teacher: User = Depends(TeacherOnly),
+) -> ProblemImportResult:
+    """Turn a ``Pxxxx_題名`` problem pack into a graded problem.
+
+    Accepts ``{"directory_path": "..."}`` for a pack already on the server, or a
+    ``multipart/form-data`` body with the pack archive in a ``file`` part (other
+    fields as form values). One URL, two shapes, because a teacher either knows a
+    server path or drags a zip onto the page.
+
+    The importer auto-discovers the ``庫題卡`` files, reads the statement PDF for
+    the title/difficulty/limits, parses the public sample card, and - when both a
+    TeDa generator and a reference solution exist - derives the hidden cases from
+    a dual run, so expected outputs come from the teacher's own program rather
+    than from a model. Anything the pack could not supply is reported in
+    ``warnings`` instead of failing the import; a folder that is not a pack at all
+    is a ``400``, never a half-created problem.
+
+    The reference solution is stored (``ref_code``) but never sent to students:
+    ``ProblemDetail`` has no field for it, and the plagiarism screen is the only
+    consumer.
+
+    Re-importing a ``problem_code`` that already exists for this teacher is
+    refused, so an import can never silently rewrite test data students were
+    already graded against.
+    """
+    content_type = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+    upload: Optional[StarletteUploadFile] = None
+    if content_type in ("multipart/form-data", "application/x-www-form-urlencoded"):
+        try:
+            form = await request.form()
+        except Exception as exc:  # malformed multipart framing
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Could not read the multipart form: {exc}",
+            ) from exc
+        # ``Request.form()`` hands back Starlette's own ``UploadFile``; FastAPI's
+        # ``UploadFile`` is a subclass of it, so checking against the FastAPI name
+        # would reject every real upload.
+        candidate = form.get("file")
+        upload = candidate if isinstance(candidate, StarletteUploadFile) else None
+        fields = {
+            key: value
+            for key, value in (
+                ("directory_path", form.get("directory_path")),
+                ("classroom_id", form.get("classroom_id")),
+                ("generate_hidden", form.get("generate_hidden")),
+                ("num_random", form.get("num_random")),
+                ("seed", form.get("seed")),
+            )
+            if value not in (None, "")
+        }
+        try:
+            payload = ImportPackRequest(**fields)
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=json.loads(exc.json()),
+            ) from exc
+    else:
+        try:
+            body = await request.json()
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Expected a JSON body or a multipart/form-data pack upload.",
+            ) from exc
+        try:
+            payload = ImportPackRequest.model_validate(body)
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=json.loads(exc.json()),
+            ) from exc
+
+    # Exactly one source: an upload *and* a path would leave the teacher guessing
+    # which one produced the problem in front of them.
+    if (payload.directory_path is None) == (upload is None):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Supply exactly one of `directory_path` (a pack folder or .zip on "
+                "the server) or a `file` upload of the pack archive."
+            ),
+        )
+
+    if payload.classroom_id is not None:
+        classroom = db.get(Classroom, payload.classroom_id)
+        if classroom is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Class not found."
+            )
+        if not teacher.is_admin and classroom.teacher_id != teacher.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only publish problems to a class you teach.",
+            )
+
+    temp_dir: Optional[Path] = None
+    try:
+        if upload is not None:
+            temp_dir = Path(tempfile.mkdtemp(prefix="cj-upload-"))
+            source = await _spool_pack_upload(upload, temp_dir)
+        else:
+            source = _authorised_pack_path(str(payload.directory_path), teacher)
+            if not source.exists():
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"No problem pack found at {source}.",
+                )
+
+        try:
+            pack = await run_in_threadpool(
+                parse_problem_pack,
+                str(source),
+                # A zip is unpacked into a directory that is deleted immediately
+                # afterwards, so the statement PDF must be copied out of it.
+                pdf_dir=str(_pack_pdf_dir()),
+                generate_hidden=payload.generate_hidden,
+                num_random=payload.num_random,
+                seed=payload.seed,
+            )
+        except ProblemPackError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"That is not a usable problem pack: {exc}",
+            ) from exc
+
+        problem_code = pack.get("problem_code")
+        warnings = [str(note) for note in pack.get("warnings") or []]
+        if problem_code:
+            clash = (
+                db.query(Problem)
+                .filter(Problem.problem_code == problem_code)
+                .filter(Problem.teacher_id == teacher.id)
+                .first()
+            )
+            if clash is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        f"{problem_code} is already problem {clash.id} in your "
+                        "bank; delete it before re-importing the pack."
+                    ),
+                )
+
+        cases = list(pack.get("test_cases") or [])
+        if len(cases) > MAX_TEST_CASES:
+            kept_samples = [case for case in cases if case["is_sample"]][:MAX_TEST_CASES]
+            room = max(0, MAX_TEST_CASES - len(kept_samples))
+            cases = kept_samples + [
+                case for case in cases if not case["is_sample"]
+            ][:room]
+            warnings.append(
+                f"the pack produced more than {MAX_TEST_CASES} cases; kept every "
+                f"sample and the first {room} random ones"
+            )
+        if not cases:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "The pack produced no test cases, so nothing could be graded"
+                    + (": " + "; ".join(warnings) if warnings else ".")
+                ),
+            )
+
+        difficulty = str(pack.get("difficulty") or Difficulty.EASY)
+        starter_c = str(pack.get("starter_code_c") or "")
+        starter_cpp = str(pack.get("starter_code_cpp") or "")
+        problem = Problem(
+            title=str(pack.get("title") or pack.get("pack_name") or "Untitled")[:200],
+            description=str(pack.get("description") or "")[:MAX_DESCRIPTION_CHARS],
+            difficulty=difficulty if difficulty in Difficulty.ALL else Difficulty.EASY,
+            time_limit_sec=min(
+                max(float(pack.get("time_limit_sec") or 3.0), MIN_TIME_LIMIT_SEC),
+                MAX_TIME_LIMIT_SEC,
+            ),
+            memory_limit_mb=min(
+                max(int(pack.get("memory_limit_mb") or 256), MIN_MEMORY_LIMIT_MB),
+                MAX_MEMORY_LIMIT_MB,
+            ),
+            teacher_id=teacher.id,
+            classroom_id=payload.classroom_id,
+            # A pack ships a reference solution, not a scaffold: students start
+            # from the platform's blank-but-compiling template instead.
+            starter_code_c=starter_c or DEFAULT_STARTER_C,
+            starter_code_cpp=starter_cpp or DEFAULT_STARTER_CPP,
+            problem_code=problem_code,
+            ref_code=pack.get("ref_code"),
+            ref_language=pack.get("ref_language"),
+            teda_random_script=pack.get("teda_random_script"),
+            wording_rules=pack.get("wording_rules"),
+            pdf_path=pack.get("pdf_path"),
+        )
+        problem.test_cases = [
+            TestCase(
+                input=str(case.get("input") or ""),
+                expected_output=str(case.get("expected_output") or ""),
+                is_sample=bool(case.get("is_sample")),
+            )
+            for case in cases
+        ]
+        db.add(problem)
+        try:
+            db.commit()
+            db.refresh(problem)
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="The class disappeared while the pack was being imported.",
+            ) from None
+
+        logger.info(
+            "teacher %s imported pack %s as problem %s (%d sample + %d hidden cases)",
+            teacher.id,
+            pack.get("pack_name"),
+            problem.id,
+            len(problem.sample_test_cases),
+            len(problem.hidden_test_cases),
+        )
+        return ProblemImportResult(
+            **_problem_detail(problem, reveal_hidden=True).model_dump(),
+            pack_name=str(pack.get("pack_name") or ""),
+            pack_source=str((pack.get("source") or {}).get("kind") or ""),
+            sample_case_count=len(problem.sample_test_cases),
+            random_case_count=len(problem.hidden_test_cases),
+            warnings=warnings,
+        )
+    finally:
+        if temp_dir is not None:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 @app.post(
     "/api/problems/{problem_id}/submit",
     response_model=SubmissionResult,
@@ -1823,9 +2886,28 @@ async def submit_to_problem(
     :class:`models.Submission`; a teacher's or admin's run is a ``trial_run`` and
     is not recorded, keeping class statistics about students clean.
 
+    Three extra layers run on top of the pass/fail verdict, all of them recorded
+    on the submission and returned in the response:
+
+    ``rubric``
+        The 100-point teaching rubric from :func:`_build_rubric`, so an attempt
+        that only missed the last hidden case is not reported as a zero.
+    ``presentation_warning``
+        The answer was correct but not byte-strict (trailing spaces / stray blank
+        lines): a formatting fault, not a logic fault.
+    ``wording_pass`` / ``wording_violations``
+        The TeDa-Wording screen (``*_庫題卡碼文限碼``) of
+        :func:`wording_rules.check_wording_rules`, when the problem declares any.
+    ``patch_probe``
+        The Minimal Patch Probe of :func:`patch_probe.probe_minimal_patch`, run
+        only when the attempt did not pass everything - and only for students, so
+        a teacher previewing a broken draft does not wait for a rescue attempt.
+        It reports *which* slips were repairable and how far the repaired program
+        got; it never returns the repaired source.
+
     The whole run holds one of the ``MAX_CONCURRENT_RUNS`` judge slots, so the
     wall-clock cost (up to ``test_cases x (compile + time_limit)``) is bounded and
-    shared fairly with ``POST /api/run``.
+    shared fairly with ``POST /api/run``. The probe takes a slot of its own.
     """
     problem = _load_problem(db, problem_id)
     _assert_problem_visible(problem, user, db)
@@ -1842,7 +2924,6 @@ async def submit_to_problem(
         report = await run_in_threadpool(
             _judge_all_cases, payload.code, payload.language, cases, timeout
         )
-
     if report.judge_error:
         # The sandbox itself failed (missing compiler, unwritable tmpfs, ...).
         # Nothing was measured, so nothing is recorded.
@@ -1862,6 +2943,47 @@ async def submit_to_problem(
     verdict = report.aggregate_status(total_count)
     score = round(100.0 * passed_count / total_count, 2) if total_count else 0.0
     trial_run = not user.is_student
+
+    # -- Stage 4: TeDa-Wording screen ---------------------------------------- #
+    # Checked on the raw source: a banned identifier has to be findable where the
+    # student wrote it. A problem with no rule file passes trivially, so "no
+    # rules declared" can never be mistaken for "the student complied".
+    wording_pass = True
+    wording_violations: list[str] = []
+    if problem.has_wording_rules:
+        wording = check_wording_rules(payload.code, problem.wording_rules)
+        wording_pass = bool(wording.get("wording_pass", True))
+        wording_violations = [str(item) for item in wording.get("violations") or []]
+
+    # -- Stage 4: presentation warning --------------------------------------- #
+    # Only an otherwise-correct submission can be a presentation error: a wrong
+    # answer is reported as such, and the whitespace noise is not the lesson.
+    presentation_warning = bool(
+        verdict == SubmissionStatus.ACCEPTED and report.presentation_warning()
+    )
+
+    # -- Stage 4: Minimal Patch Probe ---------------------------------------- #
+    probe_result: Optional[dict] = None
+    if verdict != SubmissionStatus.ACCEPTED and not trial_run:
+        probe_cases = _probe_cases(cases)
+        if probe_cases:
+            async with _execution_slots(request):
+                probe_result = await run_in_threadpool(
+                    probe_minimal_patch,
+                    payload.code,
+                    payload.language,
+                    probe_cases,
+                    timeout,
+                )
+
+    rubric = _build_rubric(
+        report,
+        verdict,
+        presentation_warning=presentation_warning,
+        wording_pass=wording_pass,
+        probe=probe_result,
+        trial_run=trial_run,
+    )
     submission_id: Optional[int] = None
 
     if not trial_run:
@@ -1875,6 +2997,14 @@ async def submit_to_problem(
             passed_count=passed_count,
             total_count=total_count,
             execution_time_ms=report.slowest_ms(),
+            compile_score=rubric.compile_score,
+            sample_score=rubric.sample_score,
+            random_score=rubric.random_score,
+            logic_score=rubric.logic_score,
+            quality_score=rubric.quality_score,
+            presentation_warning=presentation_warning,
+            wording_pass=wording_pass,
+            wording_violations=_wording_json(wording_violations),
         )
         db.add(submission)
         try:
@@ -1891,13 +3021,18 @@ async def submit_to_problem(
     hidden_cases = [outcome for outcome in report.outcomes if not outcome.is_sample]
     hidden_passed = sum(1 for outcome in hidden_cases if outcome.passed)
     logger.info(
-        "graded problem %s for %s: status=%s score=%.2f (%d/%d)%s",
+        "graded problem %s for %s: status=%s score=%.2f (%d/%d) rubric=%.2f "
+        "pe=%s wording_pass=%s probe=%s%s",
         problem_id,
         user.username,
         verdict,
         score,
         passed_count,
         total_count,
+        rubric.total,
+        presentation_warning,
+        wording_pass,
+        (probe_result or {}).get("applied_fixes") or "-",
         " [trial run]" if trial_run else "",
     )
 
@@ -1925,12 +3060,52 @@ async def submit_to_problem(
             passed=hidden_passed,
             failed=len(hidden_cases) - hidden_passed,
         ),
+        rubric=RubricScores(**rubric.as_dict()),
+        presentation_warning=presentation_warning,
+        wording_pass=wording_pass,
+        wording_violations=wording_violations,
+        patch_probe=_probe_public(probe_result),
     )
 
 
 # --------------------------------------------------------------------------- #
 # Submission history
 # --------------------------------------------------------------------------- #
+
+
+def _load_submission(db: Session, submission_id: int) -> Submission:
+    """Load one submission with its problem and author preloaded, or ``404``."""
+    submission = (
+        db.query(Submission)
+        .options(joinedload(Submission.problem), joinedload(Submission.student))
+        .filter(Submission.id == submission_id)
+        .one_or_none()
+    )
+    if submission is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Submission not found."
+        )
+    return submission
+
+
+def _assert_submission_visible(db: Session, submission: Submission, user: User) -> None:
+    """Raise ``403`` unless ``user`` may read ``submission``.
+
+    Allowed: the author, the problem's teacher, the teacher of the class the
+    problem belongs to, and admins.
+    """
+    problem = submission.problem
+    allowed = user.is_admin or submission.student_id == user.id
+    if not allowed and problem is not None:
+        allowed = problem.teacher_id == user.id or (
+            problem.classroom_id is not None
+            and problem.classroom_id in _teacher_classroom_ids(db, user)
+        )
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You may not review this submission.",
+        )
 
 
 def _submission_conditions(db: Session, user: User) -> tuple[list, list[int]]:
@@ -2054,49 +3229,24 @@ async def list_submissions(
             total_count=row.total_count,
             execution_time_ms=row.execution_time_ms,
             created_at=row.created_at,
+            ai_feedback=row.ai_feedback,
+            ai_suggested_score=row.ai_suggested_score,
+            ai_model=row.ai_model,
+            ai_reviewed_at=row.ai_reviewed_at,
+            teacher_feedback=row.teacher_feedback,
+            teacher_score=row.teacher_score,
+            reviewed_by_id=row.reviewed_by_id,
+            reviewed_at=row.reviewed_at,
+            rubric_total=row.rubric_total,
         )
         for row in rows
     ]
     return SubmissionListResponse(total=int(total), count=len(payloads), submissions=payloads)
 
 
-@app.get(
-    "/api/submissions/{submission_id}",
-    response_model=SubmissionDetailOut,
-    summary="One submission with its source",
-)
-async def read_submission(
-    submission_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)
-) -> SubmissionDetailOut:
-    """A single recorded attempt, including the submitted source code.
-
-    Restricted to the author, the problem's teacher and admins - the source is
-    the student's own work and is not exposed to other students.
-    """
-    submission = (
-        db.query(Submission)
-        .options(joinedload(Submission.problem), joinedload(Submission.student))
-        .filter(Submission.id == submission_id)
-        .one_or_none()
-    )
-    if submission is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Submission not found."
-        )
-
+def _submission_detail(submission: Submission) -> SubmissionDetailOut:
+    """Serialise one submission (with its source) for the review endpoints."""
     problem = submission.problem
-    allowed = user.is_admin or submission.student_id == user.id
-    if not allowed and problem is not None:
-        allowed = problem.teacher_id == user.id or (
-            problem.classroom_id is not None
-            and problem.classroom_id in _teacher_classroom_ids(db, user)
-        )
-    if not allowed:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You may not review this submission.",
-        )
-
     return SubmissionDetailOut(
         id=submission.id,
         problem_id=submission.problem_id,
@@ -2112,6 +3262,405 @@ async def read_submission(
         execution_time_ms=submission.execution_time_ms,
         created_at=submission.created_at,
         code=submission.code,
+        ai_feedback=submission.ai_feedback,
+        ai_suggested_score=submission.ai_suggested_score,
+        ai_model=submission.ai_model,
+        ai_reviewed_at=submission.ai_reviewed_at,
+        teacher_feedback=submission.teacher_feedback,
+        teacher_score=submission.teacher_score,
+        reviewed_by_id=submission.reviewed_by_id,
+        reviewed_at=submission.reviewed_at,
+        rubric_total=submission.rubric_total,
+        rubric=RubricScores(
+            compile_score=submission.compile_score,
+            sample_score=submission.sample_score,
+            random_score=submission.random_score,
+            logic_score=submission.logic_score,
+            quality_score=submission.quality_score,
+            total=submission.rubric_total,
+        ),
+        presentation_warning=bool(submission.presentation_warning),
+        wording_pass=bool(submission.wording_pass),
+        wording_violations=_wording_list(submission.wording_violations),
+    )
+
+
+@app.get("/api/submissions/{submission_id}", response_model=SubmissionDetailOut, summary="One submission with its source")
+async def read_submission(
+    submission_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+) -> SubmissionDetailOut:
+    """A single recorded attempt, including the submitted source code.
+
+    Restricted to the author, the problem's teacher and admins - the source is
+    the student's own work and is not exposed to other students.
+    """
+    submission = _load_submission(db, submission_id)
+    _assert_submission_visible(db, submission, user)
+
+    return _submission_detail(submission)
+
+
+# --------------------------------------------------------------------------- #
+# Phase 4: AI tutor and teacher review
+# --------------------------------------------------------------------------- #
+
+
+@app.get(
+    "/api/ai/status",
+    response_model=AIStatusResponse,
+    summary="Is the AI tutor reachable?",
+)
+async def ai_status() -> AIStatusResponse:
+    """Report whether the vLLM tutor answers, or whether the heuristic will.
+
+    The probe performs one short HTTP request, so it runs in the threadpool and
+    never stalls the event loop while a student waits for the AI panel.
+    """
+    report = await run_in_threadpool(check_ai_status)
+    return AIStatusResponse(**report)
+
+
+@app.post(
+    "/api/ai/analyze",
+    response_model=AIAnalyzeResponse,
+    summary="Review a source file without grading it",
+)
+async def ai_analyze(
+    payload: AIAnalyzeRequest,
+    db: Session = Depends(get_db),
+    user: Optional[User] = Depends(get_optional_user),
+) -> AIAnalyzeResponse:
+    """Return a structured review of ``payload.code`` without storing anything.
+
+    Used by the Run panel and by teachers previewing a solution. Authentication
+    is optional, but naming a ``problem_id`` requires it so the statement of a
+    class problem cannot be pulled by an anonymous caller. **Test cases -
+    sample or hidden - are never sent to the model.**
+    """
+    title = ""
+    description = ""
+    if payload.problem_id is not None:
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Sign in to review code against a problem.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        problem = _load_problem(db, payload.problem_id)
+        _assert_problem_visible(problem, user, db)
+        title, description = problem.title, problem.description
+
+    for_teacher = bool(user and (user.is_teacher or user.is_admin))
+    analysis = await run_in_threadpool(
+        analyze_code,
+        payload.code,
+        payload.language,
+        status=payload.status or "unknown",
+        compile_output=payload.compile_output or "",
+        stderr=payload.stderr or "",
+        problem_title=title,
+        problem_description=description,
+        for_teacher=for_teacher,
+    )
+    return AIAnalyzeResponse(**analysis)
+
+
+@app.post(
+    "/api/submissions/{submission_id}/ai-review",
+    response_model=SubmissionAIReviewResponse,
+    summary="AI review of a recorded submission",
+)
+async def ai_review_submission(
+    submission_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> SubmissionAIReviewResponse:
+    """Review one recorded attempt and persist the feedback on its row.
+
+    Visible to the same audience as ``GET /api/submissions/{id}``; the persona
+    (coach vs. grader) follows the caller, so only a teacher sees a worked
+    solution. A model outage degrades to the heuristic reviewer instead of
+    failing the request.
+    """
+    submission = _load_submission(db, submission_id)
+    _assert_submission_visible(db, submission, user)
+
+    problem = submission.problem
+    analysis = await run_in_threadpool(
+        analyze_code,
+        submission.code,
+        submission.language,
+        status=submission.status,
+        problem_title=problem.title if problem else "",
+        problem_description=problem.description if problem else "",
+        score=submission.score,
+        passed_count=submission.passed_count,
+        total_count=submission.total_count,
+        for_teacher=bool(user.is_teacher or user.is_admin),
+    )
+
+    submission.ai_feedback = analysis["feedback_markdown"]
+    submission.ai_suggested_score = analysis["suggested_score"]
+    submission.ai_model = analysis["model"]
+    submission.ai_reviewed_at = utcnow()
+    db.commit()
+    db.refresh(submission)
+    logger.info(
+        "ai review stored for submission %s (model=%s ai_powered=%s)",
+        submission.id,
+        analysis["model"],
+        analysis["ai_powered"],
+    )
+    detail = _submission_detail(submission)
+    return SubmissionAIReviewResponse(
+        **detail.model_dump(), analysis=AIAnalyzeResponse(**analysis)
+    )
+
+
+@app.patch(
+    "/api/submissions/{submission_id}/review",
+    response_model=SubmissionDetailOut,
+    summary="Teacher feedback and score override",
+)
+async def teacher_review_submission(
+    submission_id: int,
+    payload: TeacherReviewRequest,
+    db: Session = Depends(get_db),
+    teacher: User = Depends(TeacherOnly),
+) -> SubmissionDetailOut:
+    """Store manual grading for one attempt.
+
+    Only the problem's own teacher, the teacher of the class it belongs to, or
+    an admin may grade. The judge's ``score`` is left untouched; ``teacher_score``
+    is the human override shown next to it.
+    """
+    submission = _load_submission(db, submission_id)
+    problem = submission.problem
+    allowed = teacher.is_admin or (
+        problem is not None
+        and (
+            problem.teacher_id == teacher.id
+            or (
+                problem.classroom_id is not None
+                and problem.classroom_id in _teacher_classroom_ids(db, teacher)
+            )
+        )
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You may not grade submissions for this problem.",
+        )
+
+    submission.teacher_score = payload.teacher_score
+    submission.teacher_feedback = (payload.teacher_feedback or "").strip() or None
+    submission.reviewed_by_id = teacher.id
+    submission.reviewed_at = utcnow()
+    db.commit()
+    db.refresh(submission)
+    logger.info(
+        "teacher %s graded submission %s (score=%s)",
+        teacher.id,
+        submission.id,
+        submission.teacher_score,
+    )
+    return _submission_detail(submission)
+
+
+# --------------------------------------------------------------------------- #
+# Stage 3: plagiarism screen
+# --------------------------------------------------------------------------- #
+
+
+def _plagiarism_label(submission: Submission) -> str:
+    """Report label for one submission: recognisable, and unique per student.
+
+    The screen keys its pairs by these labels and never parses them, so the only
+    requirements are that a teacher recognises them and that two students cannot
+    collide - display names can repeat, ``@username`` cannot.
+    """
+    student = submission.student
+    if student is None:  # pragma: no cover - cascade delete keeps this impossible
+        return f"submission {submission.id}"
+    return f"{student.display_name} (@{student.username})"
+
+
+def _is_scaffolding(code: str, problem: Problem, language: str) -> bool:
+    """True when the source is still the untouched starter template.
+
+    Comparing two students who never edited the scaffold reports a 100% match
+    between two people who did nothing, which is not a finding.
+    """
+    stripped = (code or "").strip()
+    if not stripped:
+        return True
+    templates = {
+        problem.starter_for(language).strip(),
+        DEFAULT_STARTER_C.strip(),
+        DEFAULT_STARTER_CPP.strip(),
+    }
+    return stripped in templates
+
+
+@app.get(
+    "/api/classrooms/{classroom_id}/problems/{problem_id}/plagiarism",
+    response_model=PlagiarismReport,
+    summary="Structural similarity screen for a class problem",
+)
+async def classroom_problem_plagiarism(
+    classroom_id: int,
+    problem_id: int,
+    threshold: Annotated[
+        float, Query(ge=0.0, le=1.0, description="Escalation cut-off for a pair.")
+    ] = PLAGIARISM_DEFAULT_THRESHOLD,
+    language: Optional[LanguageLiteral] = Query(
+        default=None, description="Screen one language only; the default screens both."
+    ),
+    include_exempted: Annotated[
+        bool,
+        Query(
+            description=(
+                "Include threshold hits that Reference Baseline Subtraction "
+                "cleared, so the report shows what was dismissed and why."
+            )
+        ),
+    ] = True,
+    db: Session = Depends(get_db),
+    teacher: User = Depends(TeacherOnly),
+) -> PlagiarismReport:
+    """Rank the suspicious code pairs submitted to one problem of a class.
+
+    The comparison is structural, not textual: :mod:`plagiarism` strips comments,
+    strings and includes, rewrites ``for`` as ``while``, and renames every
+    non-standard identifier positionally, so renaming ``count`` to ``cnt`` and
+    reordering statements does not hide a shared solution. When the problem
+    carries a reference solution, two students who both simply wrote the model
+    answer are **exempted** (``flagged=False`` with an ``exemption`` note) instead
+    of accused - that subtraction is what keeps a one-line exercise from flagging
+    the whole class.
+
+    Only the class's own teacher (or an admin) may run this: it discloses other
+    students' work to whoever runs it. Submissions are deduplicated to each
+    student's strongest attempt per language, and sources that are still
+    scaffolding are left out.
+    """
+    classroom = _load_classroom(db, classroom_id)
+    _assert_classroom_visible(classroom, teacher)
+    problem = _load_problem(db, problem_id)
+    if problem.classroom_id != classroom.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="This problem is not part of that class.",
+        )
+    if not _can_manage_problem(problem, teacher):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the teacher who owns a problem may screen it for plagiarism.",
+        )
+
+    member_ids = {membership.student_id for membership in classroom.memberships}
+    filters = [Submission.problem_id == problem.id]
+    if member_ids:
+        filters.append(Submission.student_id.in_(member_ids))
+    if language:
+        filters.append(Submission.language == language)
+    rows = (
+        db.query(Submission)
+        .options(joinedload(Submission.student))
+        .filter(*filters)
+        .order_by(Submission.score.desc(), Submission.created_at.desc(), Submission.id.desc())
+        .all()
+    )
+
+    # Strongest attempt per (student, language): three half-finished drafts of the
+    # same student are not three suspects, and they would match each other.
+    strongest: dict[tuple[int, str], Submission] = {}
+    skipped_trivial = 0
+    for row in rows:
+        key = (row.student_id, row.language)
+        if key in strongest:
+            continue
+        if _is_scaffolding(row.code, problem, row.language):
+            skipped_trivial += 1
+            continue
+        strongest[key] = row
+
+    selected = sorted(strongest.values(), key=lambda row: row.id)[:PLAGIARISM_MAX_SUBMISSIONS]
+    truncated = len(strongest) > len(selected)
+
+    groups: dict[str, dict[str, int]] = {}
+    codes: dict[str, str] = {}
+    for row in selected:
+        label = _plagiarism_label(row)
+        codes[label] = row.code or ""
+        groups.setdefault(row.language, {})[label] = row.id
+
+    # Different languages are never compared: a C and a C++ solution of the same
+    # exercise look alike because the exercise is small, not because anybody
+    # copied.
+    pairs: list[PlagiarismPair] = []
+    reference_available = bool(problem.ref_code and problem.ref_code.strip())
+    for group_language, label_to_id in sorted(groups.items()):
+        if len(label_to_id) < 2:
+            continue
+        entries = {label: codes[label] for label in label_to_id}
+        measured = await run_in_threadpool(
+            compute_similarity_pairs, entries, problem.ref_code or "", threshold
+        )
+        for entry in measured:
+            flagged = bool(entry.get("flagged"))
+            if not flagged and not include_exempted:
+                continue
+            label_a = str(entry["student_a"])
+            label_b = str(entry["student_b"])
+            pairs.append(
+                PlagiarismPair(
+                    student_a=label_a,
+                    student_b=label_b,
+                    submission_id_a=label_to_id[label_a],
+                    submission_id_b=label_to_id[label_b],
+                    language=group_language,
+                    combined_similarity=float(entry["combined_similarity"]),
+                    ast_similarity=float(entry["ast_similarity"]),
+                    token_similarity=float(entry["token_similarity"]),
+                    ngram_jaccard=float(entry.get("ngram_jaccard") or 0.0),
+                    ref_similarity_a=entry.get("ref_similarity_a"),
+                    ref_similarity_b=entry.get("ref_similarity_b"),
+                    flagged=flagged,
+                    exemption=entry.get("exemption"),
+                )
+            )
+
+    pairs.sort(key=lambda pair: pair.combined_similarity, reverse=True)
+    flagged_count = sum(1 for pair in pairs if pair.flagged)
+    logger.info(
+        "plagiarism screen: teacher %s problem %s threshold=%.2f compared=%d "
+        "pairs=%d flagged=%d exempt=%d",
+        teacher.id,
+        problem.id,
+        threshold,
+        len(selected),
+        len(pairs),
+        flagged_count,
+        len(pairs) - flagged_count,
+    )
+    return PlagiarismReport(
+        problem_id=problem.id,
+        problem_title=problem.title,
+        problem_code=problem.problem_code,
+        classroom_id=classroom.id,
+        classroom_name=classroom.name,
+        threshold=threshold,
+        reference_available=reference_available,
+        languages=sorted(groups),
+        submissions_compared=len(selected),
+        students_compared=len({row.student_id for row in selected}),
+        pair_count=len(pairs),
+        flagged_count=flagged_count,
+        exempt_count=len(pairs) - flagged_count,
+        skipped_trivial=skipped_trivial,
+        truncated=truncated,
+        pairs=pairs,
     )
 
 

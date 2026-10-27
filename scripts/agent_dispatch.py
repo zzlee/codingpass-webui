@@ -48,7 +48,7 @@ def run_agent(role: str, prompt: str, files: list = None, print_only: bool = Tru
         
     if files:
         for f in files:
-            cmd.extend(["@", f])
+            cmd.append(f"@{f}")
             
     cmd.append(prompt)
     

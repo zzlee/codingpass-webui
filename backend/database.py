@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Optional
 
-from sqlalchemy import Engine, create_engine, event
+from sqlalchemy import Engine, create_engine, event, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 logger = logging.getLogger("codingpass.db")
@@ -136,11 +136,121 @@ def init_db() -> None:
     # imported is the only one whose metadata actually knows about the tables.
     metadata = getattr(getattr(models, "Base", None), "metadata", None) or Base.metadata
     metadata.create_all(bind=engine)
+    _ensure_submission_columns(engine)
+    _ensure_problem_columns(engine)
     logger.info("database ready at %s", _safe_url(DATABASE_URL))
     try:
         seed_default_data()
     except Exception:  # defensive: a broken seed must not take the judge down
         logger.exception("seed step failed - continuing with the existing data")
+
+
+#: Phase 4 ``submissions`` columns added after the first release, as
+#: ``(column name, SQL type)``. ``create_all`` never alters an existing table, so
+#: an older ``codingpass.db`` is upgraded in place instead of being recreated.
+#: The Stage 4 rubric columns are ``NOT NULL`` in the ORM, so each of them
+#: carries a SQL ``DEFAULT`` here too: SQLite refuses to add a
+#: ``NOT NULL``-style column to a populated table without one, and the default
+#: doubles as the backfilled value for the historic rows.
+SUBMISSION_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("ai_feedback", "TEXT"),
+    ("ai_suggested_score", "FLOAT"),
+    ("ai_model", "VARCHAR(64)"),
+    ("ai_reviewed_at", "DATETIME"),
+    ("teacher_feedback", "TEXT"),
+    ("teacher_score", "FLOAT"),
+    ("reviewed_by_id", "INTEGER REFERENCES users(id) ON DELETE SET NULL"),
+    ("reviewed_at", "DATETIME"),
+    # --- Stage 4: 100-point rubric breakdown ------------------------------- #
+    ("compile_score", "FLOAT DEFAULT 0.0"),
+    ("sample_score", "FLOAT DEFAULT 0.0"),
+    ("random_score", "FLOAT DEFAULT 0.0"),
+    ("logic_score", "FLOAT DEFAULT 0.0"),
+    ("quality_score", "FLOAT DEFAULT 0.0"),
+    ("presentation_warning", "BOOLEAN DEFAULT 0"),
+    ("wording_pass", "BOOLEAN DEFAULT 1"),
+    ("wording_violations", "TEXT"),
+)
+
+
+#: Problem-pack columns added after the first release, as ``(column name,
+#: SQL type)``. ``problem_code`` also gets its ORM index backfilled below.
+PROBLEM_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("problem_code", "VARCHAR(32)"),
+    ("ref_code", "TEXT"),
+    ("ref_language", "VARCHAR(8)"),
+    ("teda_random_script", "TEXT"),
+    ("wording_rules", "TEXT"),
+    ("pdf_path", "VARCHAR(255)"),
+)
+
+
+def _ensure_columns(
+    engine: Engine, table: str, migrations: tuple[tuple[str, str], ...]
+) -> None:
+    """Add missing columns to an existing SQLite ``table`` via in-place ALTERs.
+
+    ``CREATE TABLE IF NOT EXISTS`` is a no-op for a table that already exists, so
+    a database created before a column was introduced would otherwise fail every
+    read of the new ORM columns. ``PRAGMA table_info`` reports the current
+    columns and each absent one is added with ``ALTER TABLE ... ADD COLUMN``;
+    nullable columns with no default are a cheap metadata-only operation in
+    SQLite. Non-SQLite URLs are left alone (there ``create_all`` plus a real
+    migration tool owns the schema).
+    """
+    if not _is_sqlite(str(engine.url)):
+        return
+
+    with engine.begin() as connection:
+        existing = {
+            str(row[1]).lower()
+            for row in connection.execute(
+                text(f"PRAGMA table_info({table})")
+            ).fetchall()
+        }
+        if not existing:
+            return  # table absent: ``create_all`` just built it with every column.
+        for column, sql_type in migrations:
+            if column.lower() in existing:
+                continue
+            connection.execute(
+                text(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}")
+            )
+            logger.info("migration: added %s.%s (%s)", table, column, sql_type)
+
+
+def _ensure_submission_columns(engine: Engine) -> None:
+    """Add missing Phase 4 columns to an existing SQLite ``submissions`` table."""
+    _ensure_columns(engine, "submissions", SUBMISSION_MIGRATIONS)
+
+
+def _ensure_problem_columns(engine: Engine) -> None:
+    """Add missing problem-pack columns to ``problems`` and backfill the index.
+
+    ``ALTER TABLE ... ADD COLUMN`` cannot carry an ``INDEX`` clause and
+    ``create_all`` never touches a pre-existing table, so the ORM index on
+    ``problem_code`` (``ix_problems_problem_code``) is created here with
+    ``CREATE INDEX IF NOT EXISTS`` once the column itself exists.
+    """
+    _ensure_columns(engine, "problems", PROBLEM_MIGRATIONS)
+    if not _is_sqlite(str(engine.url)):
+        return
+
+    with engine.begin() as connection:
+        existing = {
+            str(row[1]).lower()
+            for row in connection.execute(
+                text("PRAGMA table_info(problems)")
+            ).fetchall()
+        }
+        if "problem_code" not in existing:
+            return  # table absent entirely; create_all already indexed the column.
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_problems_problem_code "
+                "ON problems (problem_code)"
+            )
+        )
 
 
 def _safe_url(url: str) -> str:
