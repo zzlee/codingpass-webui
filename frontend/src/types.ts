@@ -78,6 +78,7 @@ export interface BackendHealth {
   info: HealthResponse | null
 }
 
+
 /** File extension the judge compiles a language with. */
 export const SOURCE_EXTENSION: Record<Language, string> = {
   c: 'c',
@@ -101,3 +102,215 @@ export function formatMs(value: number | null | undefined): string {
   if (value === null || value === undefined || Number.isNaN(value)) return '-'
   return `${value.toFixed(value < 10 ? 2 : 1)} ms`
 }
+
+/* ==========================================================================
+ * Phase 2 / 3 - accounts, classrooms, problem bank and graded submissions.
+ * -------------------------------------------------------------------------- */
+
+/** Account roles mirrored from `models.Role`. */
+export type Role = 'admin' | 'teacher' | 'student'
+
+/** Problem difficulty mirrored from `models.Difficulty`. */
+export type Difficulty = 'easy' | 'medium' | 'hard'
+
+/**
+ * Aggregate verdict of a graded submission **and** of a single test case
+ * (`SubmissionStatusLiteral` / `CaseStatusLiteral` share the vocabulary).
+ */
+export type Verdict =
+  | 'accepted'
+  | 'wrong_answer'
+  | 'time_limit_exceeded'
+  | 'compile_error'
+  | 'runtime_error'
+
+/** `UserOut` - public view of an account. */
+export interface User {
+  id: number
+  username: string
+  email: string
+  full_name: string
+  role: Role
+  created_at: string
+}
+
+/** `TokenResponse` - body of `POST /api/auth/login`. */
+export interface TokenResponse {
+  access_token: string
+  token_type: 'bearer'
+  /** Token lifetime in seconds. */
+  expires_in: number
+  user: User
+}
+
+/** Body of `POST /api/auth/register`. */
+export interface RegisterRequest {
+  username: string
+  email: string
+  password: string
+  full_name?: string
+  /** Only an admin caller may raise this above `student`. */
+  role?: Role
+}
+
+/** `ClassroomOut` - one row of `GET /api/classrooms`. */
+export interface Classroom {
+  id: number
+  name: string
+  /** Invite code students use to enrol (e.g. `CS101`). */
+  code: string
+  description: string
+  teacher_id: number
+  teacher_name: string
+  created_at: string
+  student_count: number
+  problem_count: number
+}
+
+/** `ClassroomMemberOut` - one enrolled student. */
+export interface ClassroomMember {
+  id: number
+  username: string
+  full_name: string
+  email: string
+  joined_at: string
+}
+
+/** `ClassroomDetail` - `GET /api/classrooms/{id}`. */
+export interface ClassroomDetail extends Classroom {
+  teacher_username: string
+  students: ClassroomMember[]
+  problems: ProblemSummary[]
+}
+
+/** `TestCasePublic` - a sample case as shown to students. */
+export interface TestCasePublic {
+  id: number
+  input: string
+  expected_output: string
+  is_sample: boolean
+}
+
+/** `TestCaseIn` - a test case as authored by a teacher. */
+export interface TestCaseDraft {
+  input: string
+  expected_output: string
+  is_sample: boolean
+}
+
+/** `ProblemSummary` - compact row used in lists. */
+export interface ProblemSummary {
+  id: number
+  title: string
+  difficulty: Difficulty
+  time_limit_sec: number
+  memory_limit_mb: number
+  classroom_id: number | null
+  teacher_id: number
+  teacher_name: string
+  created_at: string
+  sample_count: number
+  hidden_count: number
+}
+
+/** `ProblemDetail` - `GET /api/problems/{id}` (samples only for students). */
+export interface ProblemDetail extends ProblemSummary {
+  description: string
+  starter_code_c: string
+  starter_code_cpp: string
+  test_cases: TestCasePublic[]
+}
+
+/** `ProblemListResponse`. */
+export interface ProblemListResponse {
+  total: number
+  count: number
+  problems: ProblemSummary[]
+}
+
+/** Body of `POST /api/problems`. */
+export interface ProblemCreateRequest {
+  title: string
+  description: string
+  difficulty: Difficulty
+  time_limit_sec: number
+  memory_limit_mb: number
+  classroom_id: number | null
+  starter_code_c: string | null
+  starter_code_cpp: string | null
+  test_cases: TestCaseDraft[]
+}
+
+/** `CaseVerdict` - verdict for one test case inside a graded submission. */
+export interface CaseVerdict {
+  test_case_id: number
+  is_sample: boolean
+  passed: boolean
+  status: Verdict
+  execution_time_ms: number
+  exit_code: number | null
+  signal_name: string | null
+  truncated: boolean
+  /** `null` for hidden cases seen by a student. */
+  input: string | null
+  expected_output: string | null
+  stdout: string | null
+  stderr: string | null
+}
+
+/** `HiddenSummary`. */
+export interface HiddenSummary {
+  total: number
+  passed: number
+  failed: number
+}
+
+/** `SubmissionResult` - full grading report of `POST /api/problems/{id}/submit`. */
+export interface SubmissionResult {
+  /** `null` for a teacher/admin trial run. */
+  submission_id: number | null
+  problem_id: number
+  student_id: number
+  language: string
+  status: Verdict
+  /** Passed cases as a percentage, 0-100. */
+  score: number
+  passed_count: number
+  total_count: number
+  /** Slowest single case. */
+  execution_time_ms: number
+  compile_time_ms: number
+  compile_output: string
+  time_limit_sec: number
+  memory_limit_mb: number
+  trial_run: boolean
+  results: CaseVerdict[]
+  hidden_summary: HiddenSummary
+}
+
+/** `SubmissionOut` - one row of `GET /api/submissions`. */
+export interface SubmissionRow {
+  id: number
+  problem_id: number
+  problem_title: string
+  student_id: number
+  student_username: string
+  student_name: string
+  language: string
+  status: Verdict
+  score: number
+  passed_count: number
+  total_count: number
+  execution_time_ms: number
+  created_at: string
+}
+
+/** `SubmissionListResponse`. */
+export interface SubmissionListResponse {
+  total: number
+  count: number
+  submissions: SubmissionRow[]
+}
+
+/** Tabs of the application shell. */
+export type AppTab = 'playground' | 'problems' | 'classrooms' | 'submissions'

@@ -1,0 +1,31 @@
+# CodingPass backend requirements
+#
+#   cd backend
+#   python3 -m venv venv && ./venv/bin/pip install -r requirements.txt
+#   ./venv/bin/uvicorn main:app --host 127.0.0.1 --port 8010 --reload
+#
+# Pinned to the versions this phase was developed and tested against.
+
+# --- web layer ------------------------------------------------------------- #
+fastapi==0.162.0
+uvicorn==0.54.0
+pydantic==2.14.1
+# Parses the OAuth2 password form used by `POST /api/auth/token` (Swagger UI).
+python-multipart==0.0.32
+
+# --- persistence (database.py / models.py) --------------------------------- #
+SQLAlchemy==2.1.6
+
+# --- authentication (auth.py) ---------------------------------------------- #
+bcrypt==5.0.0
+PyJWT==2.15.1
+
+# --- sandbox (compiler.py) ------------------------------------------------- #
+# No third-party dependency: the judge shells out to gcc / g++ and constrains
+# the child with POSIX rlimits from the standard library only. gcc and g++ must
+# be present on the server PATH.
+
+# --- tests (test_judge.py, test_api.py) ------------------------------------ #
+# Both suites are plain scripts (`python test_api.py`); TestClient comes from
+# httpx, which FastAPI pulls in for its own test support.
+httpx==0.28.1

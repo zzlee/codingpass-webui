@@ -1,29 +1,37 @@
 /**
- * Top toolbar: branding, language switch, template picker, the Run CTA and the
- * live judge-health pill.
+ * Application header: branding, the four primary tabs, the judge health pill and
+ * the account area (1-click demo role switcher + user menu).
+ *
+ * The role switcher exists for lessons and demos: switching between Alice, Bob,
+ * Prof. Chen and the admin is one click because the seeded passwords are known,
+ * which makes "student view vs teacher view" a two-second exercise instead of a
+ * four-minute typing one.
  */
+import { useEffect, useRef, useState } from 'react'
 import {
   ChevronDown,
+  Check,
   CircleAlert,
   CircleCheck,
   CircleDashed,
-  CodeXml,
-  LoaderCircle,
-  Play,
+  LogIn,
+  LogOut,
   RefreshCw,
   SquareTerminal,
   WifiOff,
+  Zap,
   type LucideIcon,
 } from 'lucide-react'
 
-import type { CodeTemplate, TemplateId } from '../templates'
-import { LANGUAGE_LABEL, SOURCE_EXTENSION, type BackendHealth, type Language } from '../types'
+import { RoleBadge } from './ui'
+import { APP_TABS } from '../tabs'
+import { useAuth } from '../authContext'
+import type { QuickAccount } from '../authAccounts'
+import { useWorkspace } from '../workspaceContext'
+import { displayName, initials } from '../format'
+import type { AppTab, BackendHealth } from '../types'
 
-/** Small icon + label used by the language segmented control. */
-const LANGUAGES: Array<{ value: Language; label: string; hint: string }> = [
-  { value: 'c', label: 'C', hint: 'gcc -O2 -Wall' },
-  { value: 'cpp', label: 'C++', hint: 'g++ -O2 -std=c++17' },
-]
+/* -------------------------------------------------------------------------- */
 
 interface HealthPillStyle {
   className: string
@@ -59,19 +67,6 @@ const HEALTH_STYLES: Record<BackendHealth['status'], HealthPillStyle> = {
   },
 }
 
-export interface HeaderProps {
-  language: Language
-  onLanguageChange: (language: Language) => void
-  templates: CodeTemplate[]
-  /** Id of the template currently untouched in the editor (`''` = custom). */
-  templateId: string
-  onTemplateChange: (id: TemplateId) => void
-  running: boolean
-  onRun: () => void
-  health: BackendHealth
-  onHealthCheck: () => void
-}
-
 function HealthPill({ health, onHealthCheck }: { health: BackendHealth; onHealthCheck: () => void }) {
   const style = HEALTH_STYLES[health.status]
   const Icon = style.Icon
@@ -81,11 +76,11 @@ function HealthPill({ health, onHealthCheck }: { health: BackendHealth; onHealth
       onClick={onHealthCheck}
       title={`${health.detail}\nClick to re-check /api/health`}
       aria-label={`Backend status: ${style.label}. Re-check now.`}
-      className={`group inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors hover:brightness-125 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${style.className}`}
+      className={`group inline-flex items-center gap-2 rounded-full border px-2.5 py-1.5 text-xs font-medium transition-colors hover:brightness-125 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${style.className}`}
     >
       <span className={`h-2 w-2 shrink-0 rounded-full ${style.dotClassName}`} aria-hidden="true" />
       <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-      <span className="whitespace-nowrap">{style.label}</span>
+      <span className="hidden whitespace-nowrap xl:inline">{style.label}</span>
       <RefreshCw
         className={`h-3 w-3 shrink-0 opacity-0 transition-opacity group-hover:opacity-70 ${
           health.status === 'checking' ? 'animate-spin opacity-100' : ''
@@ -96,128 +91,247 @@ function HealthPill({ health, onHealthCheck }: { health: BackendHealth; onHealth
   )
 }
 
-export function Header({
-  language,
-  onLanguageChange,
-  templates,
-  templateId,
-  onTemplateChange,
-  running,
-  onRun,
-  health,
-  onHealthCheck,
-}: HeaderProps) {
-  const sourceName = `solution.${SOURCE_EXTENSION[language]}`
+/* -------------------------------------------------------------------------- */
+
+/** Close a popover on outside click or `Esc`. */
+function useDismissable(onDismiss: () => void) {
+  const ref = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    const onPointerDown = (event: PointerEvent) => {
+      if (ref.current && !ref.current.contains(event.target as Node)) onDismiss()
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onDismiss()
+    }
+    window.addEventListener('pointerdown', onPointerDown)
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      window.removeEventListener('pointerdown', onPointerDown)
+      window.removeEventListener('keydown', onKeyDown)
+    }
+  }, [onDismiss])
+
+  return ref
+}
+
+/**
+ * Account area: the demo role switcher plus the signed-in identity.
+ *
+ * The switcher lists the seeded accounts; the active one is ticked, so switching
+ * identity is a single click at any time.
+ */
+function AccountArea({ onSignIn }: { onSignIn: () => void }) {
+  const { user, busy, loginWithAccount, logout, quickAccounts } = useAuth()
+  const [open, setOpen] = useState(false)
+  const [pendingKey, setPendingKey] = useState<string | null>(null)
+  const popoverRef = useDismissable(() => setOpen(false))
+
+  const switchTo = async (account: QuickAccount) => {
+    if (busy || account.key === user?.username) {
+      setOpen(false)
+      return
+    }
+    setPendingKey(account.key)
+    try {
+      await loginWithAccount(account)
+    } finally {
+      setPendingKey(null)
+      setOpen(false)
+    }
+  }
 
   return (
-    <header className="sticky top-0 z-20 border-b border-slate-800/80 bg-slate-950/85 backdrop-blur supports-[backdrop-filter]:bg-slate-950/70">
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-3 px-4 py-3">
-        {/* Branding ------------------------------------------------------- */}
-        <div className="flex items-center gap-3">
-          <span className="grid h-10 w-10 place-items-center rounded-xl bg-gradient-to-br from-sky-500 via-indigo-500 to-fuchsia-500 shadow-lg shadow-indigo-950/60">
+    <div className="relative" ref={popoverRef}>
+      <button
+        type="button"
+        onClick={() => setOpen((previous) => !previous)}
+        aria-expanded={open}
+        aria-haspopup="menu"
+        className="inline-flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-900/80 py-1.5 pl-2 pr-2 text-left transition-colors hover:border-slate-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+      >
+        <span
+          className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-gradient-to-br from-sky-500/80 to-indigo-500/80 font-mono text-[11px] font-bold text-slate-950"
+          aria-hidden="true"
+        >
+          {initials(user)}
+        </span>
+        <span className="hidden min-w-0 leading-tight sm:block">
+          <span className="block max-w-[9rem] truncate text-xs font-semibold text-slate-100">
+            {displayName(user)}
+          </span>
+          <span className="block text-[10px] uppercase tracking-wider text-slate-500">
+            {user?.role ?? 'guest'}
+          </span>
+        </span>
+        <ChevronDown className="h-4 w-4 text-slate-500" aria-hidden="true" />
+      </button>
+
+      {open ? (
+        <div
+          role="menu"
+          className="absolute right-0 z-40 mt-2 w-72 overflow-hidden rounded-xl border border-slate-700 bg-slate-900/95 shadow-2xl shadow-slate-950/80 backdrop-blur"
+        >
+          <div className="border-b border-slate-800 px-3 py-2">
+            <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+              Quick login · role switcher
+            </p>
+            <p className="mt-0.5 text-[11px] text-slate-500">
+              Seeded demo accounts - one click switches the whole UI.
+            </p>
+          </div>
+
+          <ul className="max-h-72 overflow-y-auto py-1">
+            {quickAccounts.map((account) => {
+              const active = user?.username === account.username
+              const pending = pendingKey === account.key
+              return (
+                <li key={account.key}>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => void switchTo(account)}
+                    disabled={busy}
+                    className={`flex w-full items-center gap-2.5 px-3 py-2 text-left transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60 ${
+                      active ? 'bg-slate-800/60' : ''
+                    }`}
+                  >
+                    <span className="text-base leading-none" aria-hidden="true">
+                      {account.emoji}
+                    </span>
+                    <span className="min-w-0 flex-1 leading-tight">
+                      <span className="block truncate text-xs font-semibold text-slate-100">
+                        {account.label}
+                      </span>
+                      <span className="block truncate font-mono text-[10px] text-slate-500">
+                        {account.hint}
+                      </span>
+                    </span>
+                    <RoleBadge role={account.role} />
+                    {pending ? (
+                      <RefreshCw className="h-3.5 w-3.5 animate-spin text-sky-400" aria-hidden="true" />
+                    ) : active ? (
+                      <Check className="h-3.5 w-3.5 text-emerald-400" aria-hidden="true" />
+                    ) : null}
+                  </button>
+                </li>
+              )
+            })}
+          </ul>
+
+          <div className="flex items-center gap-2 border-t border-slate-800 px-3 py-2">
+            {user ? (
+              <button
+                type="button"
+                onClick={() => {
+                  logout()
+                  setOpen(false)
+                }}
+                className="inline-flex flex-1 items-center justify-center gap-2 rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-xs font-semibold text-slate-300 transition-colors hover:border-rose-500/50 hover:text-rose-200"
+              >
+                <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
+                Sign out
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => {
+                  setOpen(false)
+                  onSignIn()
+                }}
+                className="inline-flex flex-1 items-center justify-center gap-2 rounded-lg bg-sky-500 px-2 py-1.5 text-xs font-semibold text-slate-950 transition-colors hover:bg-sky-400"
+              >
+                <LogIn className="h-3.5 w-3.5" aria-hidden="true" />
+                Sign in / register
+              </button>
+            )}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+/* -------------------------------------------------------------------------- */
+
+export interface HeaderProps {
+  activeTab: AppTab
+  onTabChange: (tab: AppTab) => void
+  /** Open the sign-in / register modal. */
+  onSignIn: () => void
+}
+
+export function Header({ activeTab, onTabChange, onSignIn }: HeaderProps) {
+  const { health, checkHealth } = useWorkspace()
+  const { user, ready } = useAuth()
+
+  return (
+    <header className="sticky top-0 z-30 border-b border-slate-800/80 bg-slate-950/85 backdrop-blur supports-[backdrop-filter]:bg-slate-950/70">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-3 py-2.5 sm:px-4">
+        {/* Branding ------------------------------------------------------ */}
+        <div className="flex items-center gap-2.5">
+          <span className="grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br from-sky-500 via-indigo-500 to-fuchsia-500 shadow-lg shadow-indigo-950/60">
             <SquareTerminal className="h-5 w-5 text-white" strokeWidth={2.2} aria-hidden="true" />
           </span>
           <div className="leading-tight">
             <div className="flex items-baseline gap-2">
-              <span className="text-lg font-semibold tracking-tight text-white">CodingPass</span>
-              <span className="hidden rounded bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-slate-400 sm:inline">
-                student
+              <span className="text-base font-semibold tracking-tight text-white">CodingPass</span>
+              <span className="hidden rounded bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-slate-400 lg:inline">
+                C/C++ judge
               </span>
             </div>
-            <p className="text-[11px] text-slate-400">C / C++ online judge &amp; sandbox runner</p>
+            <p className="hidden text-[11px] text-slate-400 sm:block">
+              Sandbox runner · problem bank · classrooms
+            </p>
           </div>
         </div>
 
-        {/* Language segmented control ------------------------------------- */}
-        <div
-          role="group"
-          aria-label="Language"
-          className="flex items-center gap-1 rounded-lg border border-slate-700/80 bg-slate-900/80 p-1"
-        >
-          {LANGUAGES.map((option) => {
-            const active = option.value === language
+        {/* Tabs ---------------------------------------------------------- */}
+        <nav aria-label="Sections" className="-mx-1 flex min-w-0 flex-1 items-center gap-1 overflow-x-auto px-1">
+          {APP_TABS.map((tab) => {
+            const active = tab.id === activeTab
+            const Icon = tab.Icon
             return (
               <button
-                key={option.value}
+                key={tab.id}
                 type="button"
-                onClick={() => onLanguageChange(option.value)}
-                aria-pressed={active}
-                title={`${LANGUAGE_LABEL[option.value]} - ${option.hint}`}
-                className={`rounded-md px-3 py-1.5 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
+                onClick={() => onTabChange(tab.id)}
+                aria-current={active ? 'page' : undefined}
+                title={tab.hint}
+                className={`inline-flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
                   active
                     ? 'bg-sky-500/20 text-sky-200 ring-1 ring-inset ring-sky-400/50'
-                    : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'
+                    : 'text-slate-400 hover:bg-slate-800/80 hover:text-slate-200'
                 }`}
               >
-                {option.label}
+                <span aria-hidden="true">{tab.emoji}</span>
+                <Icon className="h-3.5 w-3.5" aria-hidden="true" />
+                <span className="whitespace-nowrap">{tab.label}</span>
               </button>
             )
           })}
-        </div>
+        </nav>
 
-        {/* Template picker ------------------------------------------------ */}
-        <label className="relative flex items-center">
-          <span className="sr-only">Load starter template</span>
-          <CodeXml className="pointer-events-none absolute left-3 h-4 w-4 text-slate-500" aria-hidden="true" />
-          <select
-            value={templateId}
-            onChange={(event) => {
-              const next = event.target.value as TemplateId
-              if (next) onTemplateChange(next)
-            }}
-            className="w-[15rem] max-w-[46vw] appearance-none rounded-lg border border-slate-700/80 bg-slate-900/80 py-2 pl-9 pr-8 text-sm text-slate-200 transition-colors hover:border-slate-600 focus:border-sky-500 focus:outline-none"
-          >
-            <option value="" disabled>
-              Custom code
-            </option>
-            {templates.map((template) => (
-              <option key={template.id} value={template.id}>
-                {template.label}
-              </option>
-            ))}
-          </select>
-          <ChevronDown
-            className="pointer-events-none absolute right-2.5 h-4 w-4 text-slate-500"
-            aria-hidden="true"
-          />
-        </label>
-
-        {/* Right hand side: run + health ---------------------------------- */}
-        <div className="ml-auto flex items-center gap-3">
-          <span
-            className="hidden rounded-md border border-slate-700/70 bg-slate-900/70 px-2 py-1 font-mono text-[11px] text-slate-400 md:inline"
-            title={`The judge compiles your code as ${sourceName}`}
-          >
-            {sourceName}
-          </span>
-
-          <div className="flex items-center gap-2">
+        {/* Right hand side ----------------------------------------------- */}
+        <div className="flex items-center gap-2">
+          {!ready && !user ? (
+            <span className="hidden rounded-md border border-slate-700/70 bg-slate-900/70 px-2 py-1 font-mono text-[10px] text-slate-500 md:inline">
+              restoring session…
+            </span>
+          ) : null}
+          {!user ? (
             <button
               type="button"
-              onClick={onRun}
-              disabled={running}
-              title="Compile and run your submission (Ctrl+Enter / Cmd+Enter)"
-              className="inline-flex items-center gap-2 rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950 shadow-lg shadow-emerald-950/40 transition-all hover:bg-emerald-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300 disabled:cursor-not-allowed disabled:opacity-70"
+              onClick={onSignIn}
+              title="Sign in with an account, or use a demo account from the menu"
+              className="inline-flex items-center gap-2 rounded-lg bg-sky-500 px-3 py-1.5 text-xs font-semibold text-slate-950 transition-colors hover:bg-sky-400"
             >
-              {running ? (
-                <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden="true" />
-              ) : (
-                <Play className="h-4 w-4" fill="currentColor" aria-hidden="true" />
-              )}
-              <span>{running ? 'Compiling…' : 'Run Code'}</span>
+              <Zap className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>Sign in</span>
             </button>
-
-            <kbd
-              className="hidden select-none items-center gap-1 rounded-md border border-slate-700 bg-slate-900 px-2 py-1 font-mono text-[10px] text-slate-400 lg:inline-flex"
-              title="Keyboard shortcut: Ctrl+Enter (Cmd+Enter on macOS)"
-            >
-              Ctrl
-              <span className="text-slate-600">+</span>
-              Enter
-            </kbd>
-          </div>
-
-          <HealthPill health={health} onHealthCheck={onHealthCheck} />
+          ) : null}
+          <HealthPill health={health} onHealthCheck={() => void checkHealth()} />
+          <AccountArea onSignIn={onSignIn} />
         </div>
       </div>
     </header>

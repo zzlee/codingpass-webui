@@ -14,8 +14,15 @@ dist/
 frontend/dist/
 *.local
 
+# --- test database / server artefacts --------------------------------------- #
+backend/codingpass.db
+backend/codingpass.db-shm
+backend/codingpass.db-wal
+backend/.jwt_secret
+
 # Logs and Temp
 *.log
+.pi/
 /tmp/cj-*
 .system_generated/
 
