@@ -1,0 +1,31 @@
+# Git
+.git
+.gitignore
+
+# Frontend
+frontend/node_modules
+frontend/dist
+frontend/.vite
+frontend/playwright-report
+frontend/test-results
+
+# Backend / Python
+backend/venv
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.pyd
+.pytest_cache
+
+# Database & local secrets
+backend/codingpass.db*
+backend/.jwt_secret
+*.db
+*.db-shm
+*.db-wal
+
+# Temporary / OS files
+/tmp
+*.tmp
+.DS_Store
+Thumbs.db

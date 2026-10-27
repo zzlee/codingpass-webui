@@ -1,0 +1,33 @@
+services:
+  codingpass:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: codingpass:latest
+    container_name: codingpass-webui
+    restart: unless-stopped
+    ports:
+      - "8010:8010"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8010
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-}
+      - VLLM_BASE_URL=${VLLM_BASE_URL:-http://host.docker.internal:8000/v1}
+      - VLLM_MODEL=${VLLM_MODEL:-qwen3.8-flash-nvfp4}
+      - AI_PROVIDER=${AI_PROVIDER:-vllm}
+      - MAX_CONCURRENT_RUNS=${MAX_CONCURRENT_RUNS:-4}
+      - CORS_ALLOW_ORIGINS=${CORS_ALLOW_ORIGINS:-*}
+    volumes:
+      - codingpass_data:/app/data
+    cap_add:
+      - SYS_ADMIN
+      - NET_ADMIN
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  codingpass_data:
+    name: codingpass_data

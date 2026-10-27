@@ -95,6 +95,45 @@ PIPE_DRAIN_GRACE_SECONDS: float = _env_float("CODE_PIPE_DRAIN_GRACE_SEC", 1.0)
 NPROC_HEADROOM: int = _env_int("CODE_NPROC_HEADROOM", 64)
 
 
+#: Bubblewrap (bwrap) sandbox isolation toggle (defaults to 1 if bwrap binary exists).
+ENABLE_BWRAP: bool = os.environ.get("ENABLE_BWRAP", "1").lower() in ("1", "true", "yes")
+BWRAP_PATH: Optional[str] = shutil.which("bwrap") if ENABLE_BWRAP else None
+_BWRAP_TESTED: Optional[bool] = None
+
+
+def is_bwrap_enabled() -> bool:
+    """Return whether the bubblewrap sandbox isolation is active and functional."""
+    global _BWRAP_TESTED
+    if not (ENABLE_BWRAP and BWRAP_PATH and os.path.exists(BWRAP_PATH)):
+        return False
+    if _BWRAP_TESTED is not None:
+        return _BWRAP_TESTED
+    try:
+        res = subprocess.run(
+            [
+                BWRAP_PATH,
+                "--ro-bind", "/", "/",
+                "--dev", "/dev",
+                "--proc", "/proc",
+                "--tmpfs", "/tmp",
+                "--unshare-net",
+                "--unshare-pid",
+                "--unshare-ipc",
+                "--unshare-uts",
+                "--cap-drop", "ALL",
+                "--",
+                "/bin/true",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2.0,
+        )
+        _BWRAP_TESTED = (res.returncode == 0)
+    except Exception:
+        _BWRAP_TESTED = False
+    return _BWRAP_TESTED
+
+
 class Status:
     """Terminal states reported by :func:`run_code`."""
 
@@ -590,8 +629,54 @@ def _execute(
             stdin_read, stdin_write = os.pipe()
             child_fds.append(stdin_read)
             parent_fds.append(stdin_write)
+        launch_argv = list(argv)
+        is_bwrapped = False
+        if apply_memory_limit and is_bwrap_enabled():
+            bind_dirs = {os.path.abspath(workdir)}
+            if argv and os.path.exists(argv[0]):
+                bind_dirs.add(os.path.dirname(os.path.abspath(argv[0])))
+            bind_args: List[str] = []
+            for bdir in sorted(bind_dirs):
+                bind_args.extend(["--bind", bdir, bdir])
+
+            # Mask sensitive server paths (secrets, database, application code) from sandbox
+            mask_dirs = ["/app", "/root"]
+            backend_parent = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            if backend_parent and not backend_parent.startswith("/tmp"):
+                mask_dirs.append(backend_parent)
+            db_url = os.environ.get("DATABASE_URL", "")
+            if db_url.startswith("sqlite:///"):
+                db_path = db_url.replace("sqlite:///", "")
+                db_dir = os.path.dirname(os.path.abspath(db_path))
+                if db_dir and not db_dir.startswith("/tmp"):
+                    mask_dirs.append(db_dir)
+
+            mask_args: List[str] = []
+            for mdir in sorted(set(mask_dirs)):
+                if os.path.isdir(mdir) and mdir not in bind_dirs:
+                    mask_args.extend(["--tmpfs", mdir])
+
+            launch_argv = [
+                BWRAP_PATH,  # type: ignore[list-item]
+                "--ro-bind", "/", "/",
+                "--dev", "/dev",
+                "--proc", "/proc",
+                "--tmpfs", "/tmp",
+                *mask_args,
+                *bind_args,
+                "--unshare-net",
+                "--unshare-pid",
+                "--unshare-ipc",
+                "--unshare-uts",
+                "--die-with-parent",
+                "--new-session",
+                "--cap-drop", "ALL",
+                "--",
+            ] + argv
+            is_bwrapped = True
+
         proc = subprocess.Popen(
-            argv,
+            launch_argv,
             cwd=workdir,
             stdin=stdin_read if stdin_read is not None else subprocess.DEVNULL,
             stdout=out_w,
@@ -693,6 +778,20 @@ def _execute(
             )
         for reader in readers:
             reader.join(timeout=PIPE_DRAIN_GRACE_SECONDS + 0.5)
+
+    if is_bwrapped and exit_code is not None and not timed_out:
+        # bwrap exits with 128 + signum when its child dies from a signal.
+        # Map fatal termination signals back to negative numbers (-11 for SIGSEGV, -6 for SIGABRT, etc.)
+        # while preserving application exit codes like exit(137).
+        _bwrap_signals = {
+            134: -6,   # SIGABRT
+            135: -7,   # SIGBUS
+            136: -8,   # SIGFPE
+            139: -11,  # SIGSEGV
+            152: -24,  # SIGXCPU
+        }
+        if exit_code in _bwrap_signals:
+            exit_code = _bwrap_signals[exit_code]
 
     return _ProcOutcome(
         stdout=b"".join(out_chunks),
@@ -1265,4 +1364,5 @@ def limits_summary() -> Dict[str, object]:
         "nproc_headroom": NPROC_HEADROOM,
         "pipe_drain_grace_seconds": PIPE_DRAIN_GRACE_SECONDS,
         "languages": supported_languages(),
+        "bwrap_enabled": is_bwrap_enabled(),
     }

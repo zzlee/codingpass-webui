@@ -13,6 +13,8 @@
   - **Phase 3 (多角色認證、班級管理、提交紀錄歷史與一鍵切換展示 UI)**：✅ **已完成並驗證通過**
   - **Phase 4 (AI 智能助教診斷、複雜度分析與教師批改覆核工作台)**：✅ **已完成並驗證通過**
   - **Phase 5 (CodingPass Local Agent 學生本機編譯代理與 WebSocket 雙軌分流架構)**：✅ **已完成並驗證通過**
+  - **Direction D (後端單體模組化：拆分為 routers/、services/、schemas.py、dependencies.py)**：✅ **已完成並驗證通過**
+  - **Direction C (生產容器化：Dockerfile、docker-compose.yml、SPA 安全託管與 Bubblewrap 沙盒隔離)**：✅ **已完成並驗證通過**
   - **CodingPass-Tests 深度整合 (Stage 1-4 題庫卡匯入、五項評分規程、最小修復探針、抄襲稽核)**：✅ **已完成並驗證通過**
 - **Multi-Agent 體系**：
   - Orchestrator：Antigravity (架構總指揮)
@@ -307,12 +309,13 @@ cd backend && ./venv/bin/python test_ai_phase4.py
 
 ### 10.3 伺服器端沙盒隔離升級 (Server-Side Sandbox Hardening)
 1. **檔案系統與網路命名空間隔離 (`bwrap` / `nsjail`)**：
-   - **已處置 (v1.2)**：`Problem.memory_limit_mb` 現在是**實際強制**的 `RLIMIT_AS` 上限（`run_code` / `run_code_batch` 接受 `memory_limit_mb`，由 `_judge_all_cases()` 自題目帶入，並鉗制於 16–8192 MB），因此題目標示、前端徽章與學生實際撞到的限制為同一數字，記憶體錯誤訊息亦改報該題的有效值；全局 `CODE_MEMORY_LIMIT_MB` 仍是未指定時的預設值。
-   - **現況風險**：目前 `backend/compiler.py` 採用 `resource.setrlimit`（限制 CPU、AS 虛擬記憶體、FSIZE、CORE）與 `os.setsid` 進程群組清理。然而受測執行檔仍與 FastAPI 伺服器運行於相同的 Linux 使用者權限與檔案系統視角下——學生若在正式 Submit 的 C++ 程式中撰寫 `std::ifstream("/home/.../backend/codingpass.db")` 或讀取 `.jwt_secret`，仍可能讀取到宿主機有權限訪問的檔案，或發起本地 Socket 連線。
-   - **改善方案**：在 Linux 伺服器上導入輕量級無須 root 權限的 **Bubblewrap (`bwrap`)** 或 **nsjail**：
-     - `--ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64`（僅唯讀掛載必要系統函式庫）
-     - `--tmpfs /tmp`（僅允許在獨立私有 `/tmp` 讀寫）
-     - `--unshare-net --unshare-pid --unshare-ipc`（徹底切斷網路、隔離 PID 樹與 IPC）
+   - **已處置 (v1.2)**：`Problem.memory_limit_mb` 現在是**實際強制**的 `RLIMIT_AS` 上限。
+   - **已處置 (Direction C)**：在 Linux 伺服器上完整導入 **Bubblewrap (`bwrap`)** 安全沙盒：
+     - `--ro-bind / / --dev /dev --proc /proc --tmpfs /tmp`（唯讀根目錄 + 獨立私有 `/tmp` 讀寫）。
+     - **敏感目錄防護遮蔽 (Sensitive Path Masking)**：自動將 `/app`、`/root`、專案儲存庫目錄與資料庫目錄以 `--tmpfs` 覆蓋遮蔽，即使受測程式試圖讀取 `.jwt_secret` 或 `codingpass.db`，取得之內容亦為全空，杜絕金鑰偽造與隱藏測資外洩。
+     - **命名空間與權限限縮**：`--unshare-net --unshare-pid --unshare-ipc --unshare-uts --new-session --cap-drop ALL`，徹底切斷網路、隔離 PID 樹、IPC 與 Capabilities。
+     - **動態自我探測相容性**：`is_bwrap_enabled()` 於啟動時探測容器權限（`SYS_ADMIN` + `NET_ADMIN`），若處於未開放命名空間之環境則平滑 fallback 至 POSIX rlimit 機制，絕不中斷服務。
+     - **崩潰訊號還原**：精確還原 SIGSEGV、SIGABRT、SIGFPE、SIGXCPU 等核心訊號，同時完整保留受測程式合法之應用層非零退出代碼（如 `exit(137)`）。
 
 ### 10.4 教學與考試管理功能補完 (Pedagogy & Exam Features)
 1. **題目 PDF 題面線上檢視器 (`GET /api/problems/{id}/pdf`)**：
@@ -331,10 +334,18 @@ cd backend && ./venv/bin/python test_ai_phase4.py
 
 ### 10.6 軟體工程結構與維運 (Architecture & DevOps)
 1. **後端單體檔案模組化拆分 (`backend/main.py`)**：
-   - **現況**：`backend/main.py` 目前已達 **3,800+ 行**，包含所有 Pydantic Schema、權限依賴、評測管線與 20+ 個路由。
-   - **改善方案**：按領域拆分為 `schemas.py`、`services/grading.py` 以及 `routers/`（`auth.py`、`classrooms.py`、`problems.py`、`submissions.py`、`ai.py`、`agent.py`），提升多人與多 Agent 協作時的讀寫效率（同時減少 LLM Context 消耗）。
+   - **已處置 (Direction D)**：`backend/main.py` 從 3,984 行精簡至 ~400 行。依功能職責拆解為：
+     - `config.py`：常數與邊界定義。
+     - `schemas.py`：Pydantic 請求與回應型別模型。
+     - `dependencies.py`：認證依賴、權限守門與評測槽號 Semaphore。
+     - `services/judge.py`：核心評測邏輯與五項規程評分。
+     - `routers/`：`auth.py`、`run.py`、`agent.py`、`classrooms.py`、`problems.py`、`submissions.py`、`ai.py`。
+     - 完整維持原有模組 re-export，測試與 API 契約 100% 向後相容。
 2. **容器化一鍵部署 (`Dockerfile` + `docker-compose.yml`)**：
-   - 提供整合 FastAPI、Node.js（供 TeDa 測資引擎使用）、GCC/G++、Bubblewrap 與 Nginx 靜態前端的 `docker-compose.yml`，讓助教在任何新伺服器上一行 `docker compose up -d` 即可完成課堂環境建置。
+   - **已處置 (Direction C)**：
+     - 多階段建置 `Dockerfile`（Node.js 20 建置前端 SPA，Python 3.12 運行後端、Bubblewrap、GCC/G++ 與 Node.js TeDa 引擎）。
+     - 單一容器同時服務 API 與前端靜態資源，內建 `SpaStaticFiles` 嚴格防止路徑穿越與任意檔案外洩。
+     - `docker-compose.yml` 支援資料庫持久化 Volume、Host Gateway 對接本地 vLLM，以及完整 Healthcheck。
 
 ### 10.7 改善優先級建議路線圖 (Prioritized Action Plan)
 
@@ -344,5 +355,6 @@ cd backend && ./venv/bin/python test_ai_phase4.py
 | **P0 (安全必備)** | Local Agent `Origin` 白名單 (RFC 1918) + 輸出截斷 + 孤兒 Pipe 防卡死 + `RLIMIT_NPROC` | ✅ **已完成** | 杜絕外部惡意網站透過 WebSocket 觸發本機 RCE、Fork Bomb 與 Pipe 卡死 |
 | **P1 (教學實用)** | 題目 PDF 題面預覽端點 (`GET /api/problems/{id}/pdf`) + 班級成績 CSV 匯出 (`gradebook.csv`) | ✅ **已完成** | 完整發揮庫題卡 PDF 題面價值、支援 Excel 防公式注入之成績冊匯出 |
 | **P1 (前端瘦身)** | Monaco Editor 僅載入 C/C++（剔除 4 個大型 Worker 與 80 種語言） | ✅ **已完成** | 移除 >9 MB 無用 Worker 產物，建置與載入速度翻倍 |
+| **P1 (模組架構)** | `backend/main.py` 路由與領域服務模組化拆分 (Direction D) | ✅ **已完成** | 單體 4,000 行瘦身為乾淨路由器架構，各模組職責清晰好維護 |
+| **P1 (沙盒容器)** | `bwrap` 沙盒隔離 + Dockerfile / docker-compose 一鍵部署 (Direction C) | ✅ **已完成** | 阻絕惡意程式讀取資料庫與金鑰，一鍵容器化上線 |
 | **P2 (考試進階)** | 考試時間窗、AI 開關、非同步批改佇列 (SSE) | 📋 待規劃 | 支援 40~100 人正式期中/期末上機考零超時 |
-| **P2 (架構重構)** | `backend/main.py` 路由拆分 + `bwrap` 沙盒隔離 | 📋 待規劃 | 達成競賽級安全隔離與高可維護性模組架構 |
