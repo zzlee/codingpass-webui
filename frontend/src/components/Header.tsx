@@ -15,11 +15,13 @@ import {
   CircleCheck,
   CircleDashed,
   Download,
+  KeyRound,
   Laptop,
   LogIn,
   LogOut,
   RefreshCw,
   SquareTerminal,
+  Users,
   WifiOff,
   Zap,
   type LucideIcon,
@@ -27,6 +29,8 @@ import {
 
 import { RoleBadge } from './ui'
 import AgentModal from './AgentModal'
+import ChangePasswordModal from './ChangePasswordModal'
+import UserManagementModal from './UserManagementModal'
 import { APP_TABS } from '../tabs'
 import { useAuth } from '../authContext'
 import type { QuickAccount } from '../authAccounts'
@@ -173,7 +177,15 @@ function useDismissable(onDismiss: () => void) {
  * The switcher lists the seeded accounts; the active one is ticked, so switching
  * identity is a single click at any time.
  */
-function AccountArea({ onSignIn }: { onSignIn: () => void }) {
+function AccountArea({
+  onSignIn,
+  onChangePassword,
+  onManageUsers,
+}: {
+  onSignIn: () => void
+  onChangePassword: () => void
+  onManageUsers: () => void
+}) {
   const { user, busy, loginWithAccount, logout, quickAccounts } = useAuth()
   const [open, setOpen] = useState(false)
   const [pendingKey, setPendingKey] = useState<string | null>(null)
@@ -271,6 +283,35 @@ function AccountArea({ onSignIn }: { onSignIn: () => void }) {
             })}
           </ul>
 
+          {user ? (
+            <div className="border-t border-slate-800 p-2 space-y-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setOpen(false)
+                  onChangePassword()
+                }}
+                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs font-medium text-slate-300 hover:bg-slate-800 transition-colors"
+              >
+                <KeyRound className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
+                <span>變更密碼 (Change Password)</span>
+              </button>
+              {user.role === 'admin' ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOpen(false)
+                    onManageUsers()
+                  }}
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs font-medium text-sky-300 hover:bg-sky-950/40 transition-colors"
+                >
+                  <Users className="h-3.5 w-3.5 text-sky-400" aria-hidden="true" />
+                  <span>使用者管理 (User Management)</span>
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+
           <div className="flex items-center gap-2 border-t border-slate-800 px-3 py-2">
             {user ? (
               <button
@@ -317,6 +358,8 @@ export function Header({ activeTab, onTabChange, onSignIn }: HeaderProps) {
   const { health, checkHealth } = useWorkspace()
   const { user, ready } = useAuth()
   const [agentModalOpen, setAgentModalOpen] = useState(false)
+  const [changePasswordOpen, setChangePasswordOpen] = useState(false)
+  const [userManagementOpen, setUserManagementOpen] = useState(false)
 
   return (
     <>
@@ -384,13 +427,31 @@ export function Header({ activeTab, onTabChange, onSignIn }: HeaderProps) {
                 <span>Sign in</span>
               </button>
             ) : null}
+            {user?.role === 'admin' ? (
+              <button
+                type="button"
+                onClick={() => setUserManagementOpen(true)}
+                title="管理系統使用者帳號與身分權限"
+                className="inline-flex items-center gap-1.5 rounded-full border border-sky-500/40 bg-sky-500/10 px-2.5 py-1.5 text-xs font-medium text-sky-300 transition-colors hover:brightness-125 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+              >
+                <Users className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                <span className="hidden whitespace-nowrap xl:inline">使用者管理</span>
+                <span className="xl:hidden">帳號</span>
+              </button>
+            ) : null}
             <LocalAgentPill onOpenModal={() => setAgentModalOpen(true)} />
             <HealthPill health={health} onHealthCheck={() => void checkHealth()} />
-            <AccountArea onSignIn={onSignIn} />
+            <AccountArea
+              onSignIn={onSignIn}
+              onChangePassword={() => setChangePasswordOpen(true)}
+              onManageUsers={() => setUserManagementOpen(true)}
+            />
           </div>
         </div>
       </header>
       <AgentModal open={agentModalOpen} onClose={() => setAgentModalOpen(false)} />
+      <ChangePasswordModal open={changePasswordOpen} onClose={() => setChangePasswordOpen(false)} />
+      <UserManagementModal open={userManagementOpen} onClose={() => setUserManagementOpen(false)} />
     </>
   )
 }

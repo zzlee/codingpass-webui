@@ -94,4 +94,56 @@ test.describe('CodingPass WebUI E2E Test Suite', () => {
     await expect(page.getByText('Alice')).toBeVisible()
     await expect(page.getByRole('button', { name: /匯出成績冊/ })).toBeVisible()
   })
+
+  test('Admin User Management modal and interaction', async ({ page }) => {
+    await page.goto('/')
+
+    // Sign in as Admin
+    const accountTrigger = page.locator('button[aria-haspopup="menu"]')
+    await accountTrigger.click()
+    await page.getByRole('menuitem', { name: /Admin/ }).click()
+
+    // Verify Admin button is visible
+    const userMgmtBtn = page.getByRole('button', { name: /使用者管理/ })
+    await expect(userMgmtBtn).toBeVisible()
+
+    // Click to open User Management modal
+    await userMgmtBtn.click()
+
+    // Verify User Management dialog elements
+    await expect(page.getByText('使用者帳號管理 (User Management)')).toBeVisible()
+    await expect(page.getByPlaceholder('搜尋帳號、姓名、Email…')).toBeVisible()
+    await expect(page.getByText('共計')).toBeVisible()
+
+    // Close modal
+    await page.getByRole('button', { name: '關閉' }).click()
+    await expect(page.getByText('使用者帳號管理 (User Management)')).not.toBeVisible()
+  })
+
+  test('Change Password modal interaction', async ({ page }) => {
+    await page.goto('/')
+
+    // Sign in as Alice
+    const accountTrigger = page.locator('button[aria-haspopup="menu"]')
+    await accountTrigger.click()
+    await page.getByRole('menuitem', { name: /Alice/ }).click()
+
+    // Wait for login to settle
+    await expect(accountTrigger).toContainText('Alice')
+
+    // Reopen menu and click Change Password
+    await accountTrigger.click()
+    const changePwdBtn = page.getByRole('button', { name: /變更密碼/ })
+    await expect(changePwdBtn).toBeVisible()
+    await changePwdBtn.click()
+
+    // Verify Change Password modal
+    await expect(page.getByText('變更密碼 (Change Password)')).toBeVisible()
+    await expect(page.getByPlaceholder('請輸入現有密碼')).toBeVisible()
+    await expect(page.getByPlaceholder('請輸入新密碼 (至少 6 碼)')).toBeVisible()
+
+    // Cancel modal
+    await page.getByRole('button', { name: '取消' }).click()
+    await expect(page.getByText('變更密碼 (Change Password)')).not.toBeVisible()
+  })
 })

@@ -22,7 +22,13 @@ try:
         verify_password_for_login,
     )
     from ..models import Role, User
-    from ..schemas import LoginRequest, RegisterRequest, TokenResponse, UserOut
+    from ..schemas import (
+        LoginRequest,
+        PasswordChangeRequest,
+        RegisterRequest,
+        TokenResponse,
+        UserOut,
+    )
 except ImportError:
     from auth import (  # type: ignore[no-redef]
         create_access_token,
@@ -33,7 +39,13 @@ except ImportError:
         verify_password_for_login,
     )
     from models import Role, User  # type: ignore[no-redef]
-    from schemas import LoginRequest, RegisterRequest, TokenResponse, UserOut  # type: ignore[no-redef]
+    from schemas import (  # type: ignore[no-redef]
+        LoginRequest,
+        PasswordChangeRequest,
+        RegisterRequest,
+        TokenResponse,
+        UserOut,
+    )
 
 logger = logging.getLogger("codingpass.api")
 
@@ -164,3 +176,24 @@ async def login_form(
 async def read_me(user: User = Depends(get_current_user)) -> UserOut:
     """Return the account the presented token belongs to."""
     return UserOut.model_validate(user)
+
+
+@router.post("/change-password", summary="Change own password")
+async def change_password(
+    payload: PasswordChangeRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict:
+    """Change password for the currently signed-in account."""
+    password_ok = await run_in_threadpool(
+        verify_password_for_login, payload.old_password, user.hashed_password
+    )
+    if not password_ok:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The current password you entered is incorrect.",
+        )
+    user.hashed_password = await run_in_threadpool(hash_password, payload.new_password)
+    db.commit()
+    logger.info("user '%s' (id=%s) updated their password", user.username, user.id)
+    return {"message": "Password changed successfully."}

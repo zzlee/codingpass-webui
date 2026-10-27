@@ -18,12 +18,14 @@ import type {
   ClassroomDetail,
   Difficulty,
   HealthResponse,
+  PasswordChangePayload,
   PlagiarismReport,
   ProblemCreateRequest,
   ProblemDetail,
   ProblemImportResult,
   ProblemListResponse,
   RegisterRequest,
+  Role,
   RunRequest,
   RunResponse,
   SubmissionAIReviewResponse,
@@ -34,6 +36,8 @@ import type {
   TestCaseDraft,
   TokenResponse,
   User,
+  UserListResponse,
+  UserUpdatePayload,
   Verdict,
 } from './types'
 
@@ -324,6 +328,14 @@ export interface SubmissionQuery {
   offset?: number
 }
 
+/** Filters accepted by `GET /api/users`. */
+export interface UserQuery {
+  role?: Role | ''
+  search?: string
+  limit?: number
+  offset?: number
+}
+
 /** Every endpoint the WebUI talks to, in one namespaced object. */
 export const api = {
   // -- accounts ---------------------------------------------------------
@@ -338,6 +350,20 @@ export const api = {
     request<User>('/auth/register', { method: 'POST', body: payload, auth: false }),
 
   me: () => request<User>('/auth/me'),
+
+  changePassword: (payload: PasswordChangePayload) =>
+    request<{ message: string }>('/auth/change-password', { method: 'POST', body: payload }),
+
+  listUsers: (query: UserQuery = {}) =>
+    request<UserListResponse>(`/users${qs({ ...query })}`),
+
+  getUser: (id: number) => request<User>(`/users/${id}`),
+
+  updateUser: (id: number, payload: UserUpdatePayload) =>
+    request<User>(`/users/${id}`, { method: 'PATCH', body: payload }),
+
+  deleteUser: (id: number) =>
+    request<{ message: string }>(`/users/${id}`, { method: 'DELETE' }),
 
   // -- classrooms -------------------------------------------------------
   listClassrooms: () => request<Classroom[]>('/classrooms'),

@@ -117,6 +117,7 @@ try:
     from .routers.problems import router as problems_router
     from .routers.run import router as run_router
     from .routers.submissions import router as submissions_router
+    from .routers.users import router as users_router
     from .schemas import (
         AIAnalyzeRequest,
         AIAnalyzeResponse,
@@ -131,6 +132,7 @@ try:
         HiddenSummary,
         ImportPackRequest,
         LoginRequest,
+        PasswordChangeRequest,
         PatchProbeReport,
         PlagiarismPair,
         PlagiarismReport,
@@ -153,7 +155,9 @@ try:
         TestCaseIn,
         TestCasePublic,
         TokenResponse,
+        UserListResponse,
         UserOut,
+        UserUpdate,
     )
     from .services.judge import (
         CaseOutcome,
@@ -280,6 +284,7 @@ except ImportError:
     from routers.problems import router as problems_router  # type: ignore[no-redef]
     from routers.run import router as run_router  # type: ignore[no-redef]
     from routers.submissions import router as submissions_router  # type: ignore[no-redef]
+    from routers.users import router as users_router  # type: ignore[no-redef]
     from schemas import (  # type: ignore[no-redef]
         AIAnalyzeRequest,
         AIAnalyzeResponse,
@@ -294,6 +299,7 @@ except ImportError:
         HiddenSummary,
         ImportPackRequest,
         LoginRequest,
+        PasswordChangeRequest,
         PatchProbeReport,
         PlagiarismPair,
         PlagiarismReport,
@@ -316,7 +322,9 @@ except ImportError:
         TestCaseIn,
         TestCasePublic,
         TokenResponse,
+        UserListResponse,
         UserOut,
+        UserUpdate,
     )
     from services.judge import (  # type: ignore[no-redef]
         CaseOutcome,
@@ -476,6 +484,7 @@ async def config() -> dict:
 app.include_router(run_router)
 app.include_router(agent_router)
 app.include_router(auth_router)
+app.include_router(users_router)
 app.include_router(classrooms_router)
 app.include_router(problems_router)
 app.include_router(submissions_router)

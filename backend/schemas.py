@@ -179,6 +179,49 @@ class UserOut(BaseModel):
     created_at: UtcDatetime
 
 
+class UserListResponse(BaseModel):
+    """Paginated list of user accounts for admin management."""
+
+    users: list[UserOut]
+    total: int
+
+
+class UserUpdate(BaseModel):
+    """Body of ``PATCH /api/users/{id}`` for updating user attributes."""
+
+    full_name: Optional[str] = Field(default=None, max_length=120)
+    email: Optional[str] = Field(default=None, min_length=5, max_length=255)
+    role: Optional[RoleLiteral] = None
+    password: Optional[str] = Field(
+        default=None,
+        min_length=6,
+        max_length=128,
+        description="Optional password reset by admin.",
+    )
+
+    @field_validator("email")
+    @classmethod
+    def _validate_email(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        email = value.strip().lower()
+        if not EMAIL_RE.fullmatch(email):
+            raise ValueError("email address is not valid")
+        return email
+
+    @field_validator("full_name")
+    @classmethod
+    def _validate_full_name(cls, value: Optional[str]) -> Optional[str]:
+        return value.strip() if value is not None else None
+
+
+class PasswordChangeRequest(BaseModel):
+    """Body of ``POST /api/auth/change-password``."""
+
+    old_password: str = Field(..., min_length=1, max_length=128)
+    new_password: str = Field(..., min_length=6, max_length=128)
+
+
 class RegisterRequest(BaseModel):
     """Body of ``POST /api/auth/register``."""
 

@@ -153,6 +153,26 @@ export interface RegisterRequest {
   role?: Role
 }
 
+/** Response of `GET /api/users`. */
+export interface UserListResponse {
+  users: User[]
+  total: number
+}
+
+/** Payload for `PATCH /api/users/{id}`. */
+export interface UserUpdatePayload {
+  email?: string
+  full_name?: string
+  role?: Role
+  password?: string
+}
+
+/** Payload for `POST /api/auth/change-password`. */
+export interface PasswordChangePayload {
+  old_password: string
+  new_password: string
+}
+
 /** `ClassroomOut` - one row of `GET /api/classrooms`. */
 export interface Classroom {
   id: number
