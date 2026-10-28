@@ -144,10 +144,11 @@ export function CustomTestPanel({
             </span>
           ) : (
             <span
-              title="未連線本機 Local Agent：由伺服器沙盒暫存執行，不上傳成績"
-              className="inline-flex items-center gap-1 rounded-full border border-slate-700 bg-slate-800 px-2 py-0.5 font-mono text-[10px] text-slate-400"
+              title="未連線本機 Local Agent：伺服器不開放學生直接編譯，需啟動 Local Agent 進行本機編譯"
+              className="inline-flex items-center gap-1 rounded-full border border-rose-500/40 bg-rose-500/15 px-2 py-0.5 font-mono text-[10px] font-medium text-rose-300"
             >
-              ☁️ 伺服器暫存執行
+              <span className="h-1.5 w-1.5 rounded-full bg-rose-400" />
+              Local Agent 未連線（需本機編譯）
             </span>
           )}
         </div>
@@ -187,10 +188,19 @@ export function CustomTestPanel({
             type="button"
             data-testid="btn-run-custom"
             onClick={onRun}
-            disabled={running}
+            disabled={running || !localAgentConnected}
+            title={
+              localAgentConnected
+                ? '執行自訂測資 (Ctrl+Enter)'
+                : '未連線 Local Agent：需先啟動本機代理程式才能編譯執行'
+            }
             className={buttonClass(
               'primary',
-              'gap-1.5 text-xs bg-indigo-600 hover:bg-indigo-500 border-indigo-500 text-white shadow-sm',
+              `gap-1.5 text-xs shadow-sm ${
+                localAgentConnected
+                  ? 'bg-indigo-600 hover:bg-indigo-500 border-indigo-500 text-white'
+                  : 'bg-slate-800 border-slate-700 text-slate-500 cursor-not-allowed opacity-60'
+              }`,
             )}
           >
             {running ? (
@@ -203,6 +213,15 @@ export function CustomTestPanel({
           </button>
         </div>
       </div>
+
+      {!localAgentConnected && (
+        <div className="flex items-center gap-2 border-b border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+          <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400" />
+          <span>
+            伺服器不開放學生直接編譯。請啟動 CodingPass 本機編譯代理程式 (ws://127.0.0.1:8765)，透過本機 GCC/G++ 進行自訂測資測試。
+          </span>
+        </div>
+      )}
 
       {/* Main Split Body: Left = Stdin, Right = Output */}
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-2 p-3 md:grid-cols-2 md:gap-3 overflow-y-auto">

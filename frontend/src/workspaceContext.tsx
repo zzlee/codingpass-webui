@@ -197,8 +197,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     }
 
     try {
-      const runner = customRunner ?? ((b: RunRequest) => api.run(b, RUN_TIMEOUT_MS))
-      setResponse(await runner(body))
+      if (!customRunner) {
+        throw new Error('未連線 Local Agent：伺服器不開放學生直接編譯。請啟動 CodingPass 本機編譯代理程式 (ws://127.0.0.1:8765)。')
+      }
+      setResponse(await customRunner(body))
     } catch (error) {
       setResponse(null)
       setTransportError(describeRunFailure(error))

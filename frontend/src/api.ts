@@ -33,8 +33,6 @@ import type {
   ProblemListResponse,
   RegisterRequest,
   Role,
-  RunRequest,
-  RunResponse,
   SubmissionAIReviewResponse,
   SubmissionDetail,
   SubmissionListResponse,
@@ -440,10 +438,6 @@ export const api = {
     request<PlagiarismReport>(`/classrooms/${classroomId}/problems/${problemId}/plagiarism${qs(params)}`),
 
   // -- judging ----------------------------------------------------------
-  /** Free-form playground run. Public endpoint, deliberately sent without auth. */
-  run: (payload: RunRequest, timeoutMs: number) =>
-    request<RunResponse>('/run', { method: 'POST', body: payload, auth: false, timeoutMs }),
-
   submit: (problemId: number, language: 'c' | 'cpp', code: string, timeoutMs: number) =>
     request<SubmissionResult>(`/problems/${problemId}/submit`, {
       method: 'POST',

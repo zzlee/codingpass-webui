@@ -115,7 +115,6 @@ try:
     from .routers.auth import router as auth_router
     from .routers.classrooms import _is_scaffolding, router as classrooms_router
     from .routers.problems import router as problems_router
-    from .routers.run import router as run_router
     from .routers.submissions import router as submissions_router
     from .routers.users import router as users_router
     from .routers.exams import router as exams_router
@@ -283,7 +282,6 @@ except ImportError:
     from routers.auth import router as auth_router  # type: ignore[no-redef]
     from routers.classrooms import _is_scaffolding, router as classrooms_router  # type: ignore[no-redef]
     from routers.problems import router as problems_router  # type: ignore[no-redef]
-    from routers.run import router as run_router  # type: ignore[no-redef]
     from routers.submissions import router as submissions_router  # type: ignore[no-redef]
     from routers.users import router as users_router  # type: ignore[no-redef]
     from routers.exams import router as exams_router  # type: ignore[no-redef]
@@ -377,7 +375,7 @@ async def lifespan(app: FastAPI):
     except Exception:
         app.state.db_ready = False
         logger.exception(
-            "database initialisation failed - /api/health and /api/run still "
+            "database initialisation failed - /api/health still "
             "work, but accounts, classrooms and grading are unavailable"
         )
     try:
@@ -483,7 +481,6 @@ async def config() -> dict:
 # Include Routers
 # --------------------------------------------------------------------------- #
 
-app.include_router(run_router)
 app.include_router(agent_router)
 app.include_router(auth_router)
 app.include_router(users_router)
@@ -492,6 +489,16 @@ app.include_router(problems_router)
 app.include_router(exams_router)
 app.include_router(submissions_router)
 app.include_router(ai_router)
+
+
+@app.api_route(
+    "/api/{unmatched_path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+    include_in_schema=False,
+)
+async def api_not_found(unmatched_path: str):
+    """Unmatched /api/* calls return 404 JSON instead of falling through to static SPA."""
+    raise HTTPException(status_code=404, detail="API endpoint not found.")
 
 
 # --------------------------------------------------------------------------- #

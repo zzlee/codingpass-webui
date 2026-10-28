@@ -18,6 +18,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Editor, { type OnChange, type OnMount } from '@monaco-editor/react'
 import {
+  AlertTriangle,
   ArrowLeft,
   BookOpen,
   Clock,
@@ -67,7 +68,6 @@ import {
   SOURCE_EXTENSION,
   type Language,
   type ProblemDetail,
-  type RunResponse,
   type TestCasePublic,
 } from '../types'
 
@@ -78,8 +78,6 @@ const LANGUAGE_OPTIONS: Array<{ value: Language; label: string; hint: string }> 
 
 /** Result-panel heading for runs that never touch the server. */
 const LOCAL_RUN_HEADING = '本地加速執行 (Local Agent) - 未計入成績'
-/** Result-panel heading for runs judged by `POST /api/run`. */
-const SERVER_RUN_HEADING = 'Sample run - not recorded'
 
 /**
  * Client side deadline for a whole submission: every case may burn the problem's
@@ -88,10 +86,6 @@ const SERVER_RUN_HEADING = 'Sample run - not recorded'
 function submissionTimeout(problem: ProblemDetail): number {
   const cases = Math.max(1, problem.sample_count + problem.hidden_count)
   return Math.min(600_000, Math.max(60_000, cases * (problem.time_limit_sec + 2) * 1000 + 15_000))
-}
-
-function sampleTimeout(problem: ProblemDetail): number {
-  return Math.max(30_000, (problem.time_limit_sec + 16) * 1000)
 }
 
 export interface ProblemSolverProps {
@@ -226,6 +220,13 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
       return
     }
 
+    if (agent.status !== 'connected') {
+      setNotice(
+        '未連線本機 Local Agent：學生端測試與除錯須於本機編譯執行，伺服器不提供直接編譯測試。請先啟動 CodingPass 本機編譯代理程式 (ws://127.0.0.1:8765)。',
+      )
+      return
+    }
+
     busyRef.current = true
     setRunningSamples(true)
     setActiveTab('samples')
@@ -241,74 +242,29 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
     }))
     const source = current.sources[current.language]
 
-    /** Score one verdict per sample (same order) and render the report. */
-    const fillFromResponses = (responses: RunResponse[], heading: string) => {
-      samples.forEach((testCase, index) => {
-        const response = responses[index]
-        runs[index] = {
-          ...runs[index],
-          response,
-          passed: response.status === 'success' && outputsMatch(response.stdout, testCase.expected_output),
-        }
+    try {
+      const responses = await agent.runBatchLocally({
+        code: source,
+        language: current.language,
+        stdin_list: samples.map((testCase) => testCase.input),
+        timeout_sec: Math.max(1, Math.ceil(detail.time_limit_sec)),
       })
-      setProgress({ done: samples.length, total: samples.length })
-      setReport(fromSampleRuns(runs, heading))
-    }
-
-    /** Judge the samples on the server, one case at a time, reporting progress. */
-    const runOnServer = async () => {
-      for (let index = 0; index < samples.length; index += 1) {
-        const testCase = samples[index]
-        try {
-          const response = await api.run(
-            { code: source, language: current.language, stdin: testCase.input },
-            sampleTimeout(detail),
-          )
+      if (responses.length === samples.length) {
+        samples.forEach((testCase, index) => {
+          const response = responses[index]
           runs[index] = {
             ...runs[index],
             response,
             passed: response.status === 'success' && outputsMatch(response.stdout, testCase.expected_output),
           }
-        } catch (reason) {
-          runs[index] = {
-            ...runs[index],
-            error: reason instanceof ApiError ? reason.detail : String(reason),
-          }
-          setNotice(runs[index].error)
-          break
-        }
-        setProgress({ done: index + 1, total: samples.length })
-        setReport(fromSampleRuns(runs, SERVER_RUN_HEADING))
+        })
+        setProgress({ done: samples.length, total: samples.length })
+        setReport(fromSampleRuns(runs, LOCAL_RUN_HEADING))
+      } else {
+        setNotice(`本機 Local Agent 僅回傳 ${responses.length}/${samples.length} 筆範例執行結果。`)
       }
-      setReport(fromSampleRuns(runs, SERVER_RUN_HEADING))
-    }
-
-    try {
-      let gradedLocally = false
-      if (agent.status === 'connected') {
-        try {
-          const responses = await agent.runBatchLocally({
-            code: source,
-            language: current.language,
-            stdin_list: samples.map((testCase) => testCase.input),
-            timeout_sec: Math.max(1, Math.ceil(detail.time_limit_sec)),
-          })
-          if (responses.length === samples.length) {
-            fillFromResponses(responses, LOCAL_RUN_HEADING)
-            gradedLocally = true
-          } else {
-            // One verdict per case is the batch contract. A short answer is judged
-            // on the server rather than reporting a partial - and possibly wrong -
-            // score, and the student still gets an answer instead of an error.
-            console.warn(
-              `Local Agent answered ${responses.length}/${samples.length} sample cases; falling back to the server.`,
-            )
-          }
-        } catch (localErr) {
-          console.warn('Local agent batch run failed, falling back to server:', localErr)
-        }
-      }
-      if (!gradedLocally) await runOnServer()
+    } catch (localErr) {
+      setNotice(`本機 Local Agent 執行失敗：${localErr instanceof Error ? localErr.message : String(localErr)}`)
     } finally {
       setProgress(null)
       setRunningSamples(false)
@@ -346,15 +302,26 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
   /**
    * Run the current code with custom standard input.
    *
-   * Executes locally on the student's machine if Local Agent is connected,
-   * otherwise runs on the server scratchpad runner. In neither case is any
-   * submission recorded, no hidden cases are run, and no AI review is executed.
+   * Executes locally on the student's machine via CodingPass Local Agent.
+   * Server-side compilation is not allowed without submission.
    */
   const runCustomInput = useCallback(async (): Promise<void> => {
     const current = stateRef.current
     const detail = current.problem
     const agent = current.localAgent
     if (!detail || busyRef.current) return
+
+    if (agent.status !== 'connected') {
+      setNotice(
+        '未連線本機 Local Agent：學生端測試與除錯須於本機編譯執行，伺服器不提供直接編譯測試。請先啟動 CodingPass 本機編譯代理程式 (ws://127.0.0.1:8765)。',
+      )
+      setCustomResult({
+        response: null,
+        error: '未連線本機 Local Agent：伺服器不開放直接編譯，需啟動 Local Agent 進行本機編譯執行。',
+        engine: 'local',
+      })
+      return
+    }
 
     busyRef.current = true
     setRunningCustom(true)
@@ -365,41 +332,23 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
     const timeoutSec = Math.max(1, Math.ceil(detail.time_limit_sec))
 
     try {
-      let result: RunResponse | null = null
-      let engine: 'local' | 'server' = 'server'
-
-      if (agent.status === 'connected') {
-        try {
-          result = await agent.runLocally({
-            code: source,
-            language: current.language,
-            stdin: customStdin,
-            timeout_sec: timeoutSec,
-          })
-          engine = 'local'
-        } catch (localErr) {
-          console.warn('Local agent custom run failed, falling back to server judge:', localErr)
-        }
-      }
-
-      if (!result) {
-        result = await api.run(
-          { code: source, language: current.language, stdin: customStdin },
-          sampleTimeout(detail),
-        )
-        engine = 'server'
-      }
+      const result = await agent.runLocally({
+        code: source,
+        language: current.language,
+        stdin: customStdin,
+        timeout_sec: timeoutSec,
+      })
 
       setCustomResult({
         response: result,
         error: null,
-        engine,
+        engine: 'local',
       })
     } catch (err) {
       setCustomResult({
         response: null,
-        error: err instanceof ApiError ? err.detail : String(err),
-        engine: 'server',
+        error: `本機編譯執行失敗：${err instanceof Error ? err.message : String(err)}`,
+        engine: 'local',
       })
     } finally {
       setRunningCustom(false)
@@ -676,7 +625,7 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
                   title={
                     localAgent.status === 'connected'
                       ? '由本地 CodingPass Local Agent 即時編譯執行範例測資 (Ctrl+Enter)'
-                      : 'Run against the sample cases only (Ctrl+Enter). Not recorded.'
+                      : '未連線 Local Agent：需先啟動本機代理程式才能編譯執行（伺服器端不開放直接編譯）'
                   }
                   className={buttonClass('ghost', 'text-xs')}
                 >
@@ -685,7 +634,13 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
                   ) : (
                     <Play className="h-3.5 w-3.5" fill="currentColor" aria-hidden="true" />
                   )}
-                  <span>{runningSamples ? 'Running…' : localAgent.status === 'connected' ? 'Run Samples (Local)' : 'Run Samples'}</span>
+                  <span>
+                    {runningSamples
+                      ? 'Running…'
+                      : localAgent.status === 'connected'
+                      ? 'Run Samples (Local)'
+                      : 'Run Samples (需 Local Agent)'}
+                  </span>
                 </button>
                 <button
                   type="button"
@@ -792,7 +747,7 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
                   localAgent.status === 'connected' ? (
                     <span className="text-emerald-400">⚡ 本機 Local Agent 編譯</span>
                   ) : (
-                    <span>☁️ 伺服器沙盒暫存</span>
+                    <span className="text-rose-400">🔴 Local Agent 未連線（需本機編譯）</span>
                   )
                 ) : (
                   <span>{problem.sample_count} sample · {problem.hidden_count} hidden</span>
@@ -818,13 +773,19 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
                   <ResultPanel report={report} notice={notice} />
                 </div>
               ) : (
-                <div className="flex h-full min-h-[12rem] items-center justify-center p-6 text-center">
+                <div className="flex h-full min-h-[12rem] flex-col items-center justify-center p-6 text-center">
+                  {notice ? (
+                    <div className="mb-4 flex max-w-lg items-center gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-xs text-amber-200 shadow-sm">
+                      <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400" />
+                      <span className="text-left leading-relaxed">{notice}</span>
+                    </div>
+                  ) : null}
                   <EmptyState
                     icon={<Trophy className="h-8 w-8" aria-hidden="true" />}
                     title="No result yet"
                     hint={
                       samples.length > 0
-                        ? 'Run the samples for instant feedback, switch to Custom Test to run custom stdin, or Submit to grade.'
+                        ? 'Run the samples for instant feedback (需 Local Agent)，切換至自訂測資進行除錯，或點擊 Submit 正式評測。'
                         : 'Submit to grade this solution against the problem’s test data.'
                     }
                   />

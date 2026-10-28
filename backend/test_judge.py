@@ -34,13 +34,23 @@ check(
 )
 check("health status ok", body.get("status") == "ok", body.get("status"))
 
+# Verify POST /api/run endpoint is removed from server (cannot compile via server)
+resp_run = client.post("/api/run", json={"code": "int main(){ return 0; }", "language": "c"})
+check("POST /api/run endpoint removed (404)", resp_run.status_code == 404, resp_run.status_code)
+
+
+def run_sandbox(code: str, language: str = "c", stdin: str = "", timeout: float = 5.0, **kwargs) -> dict:
+    """Direct sandbox compilation and execution runner (preserved for AI grading & review)."""
+    return compiler.run_code(code, language, stdin, timeout, **kwargs).to_dict()
+
+
 # --- success (C) ---------------------------------------------------------- #
 c_sum = """
 #include <stdio.h>
 int main(void) { int a, b; if (scanf("%d %d", &a, &b) != 2) return 1;
 printf("%d\\n", a + b); return 0; }
 """
-r = client.post("/api/run", json={"code": c_sum, "language": "c", "stdin": "2 3"}).json()
+r = run_sandbox(c_sum, "c", "2 3")
 check("c success", r["status"] == "success", r)
 check("c stdout 5", r["stdout"].strip() == "5", r["stdout"])
 check("c exit 0", r["exit_code"] == 0, r["exit_code"])
@@ -53,29 +63,29 @@ int main() { std::vector<int> v; long long s = 0; int x;
 while (std::cin >> x) { v.push_back(x); s += x; }
 std::cout << s << " n=" << v.size() << std::endl; }
 """
-r = client.post("/api/run", json={"code": cpp_code, "language": "cpp", "stdin": "1 2 3 4 5\n"}).json()
+r = run_sandbox(cpp_code, "cpp", "1 2 3 4 5\n")
 check("cpp success", r["status"] == "success", r)
 check("cpp stdout", r["stdout"].strip() == "15 n=5", r["stdout"])
 
 # --- compile error -------------------------------------------------------- #
 bad = "#include <stdio.h>\nint main(void){ printf(\"%d\\n\", undefined_thing) }"
-r = client.post("/api/run", json={"code": bad, "language": "c", "stdin": ""}).json()
+r = run_sandbox(bad, "c", "")
 check("compile_error status", r["status"] == "compile_error", r["status"])
 check("compile_error output", "undefined_thing" in r["compile_output"], r["compile_output"][:120])
 check("compile_error no exec time", r["execution_time_ms"] == 0.0, r["execution_time_ms"])
 
 cpp_bad = "int main(){ int x = \"oops\"; return 0; }"
-r = client.post("/api/run", json={"code": cpp_bad, "language": "cpp"}).json()
+r = run_sandbox(cpp_bad, "cpp")
 check("cpp compile_error", r["status"] == "compile_error", r["status"])
 
 # --- time limit ----------------------------------------------------------- #
 spin = "#include <unistd.h>\nint main(){ for(;;) usleep(1000); return 0; }"
-r = client.post("/api/run", json={"code": spin, "language": "c"}).json()
+r = run_sandbox(spin, "c", "", 3.0)
 check("wall-clock TLE", r["status"] == "time_limit_exceeded", r["status"])
 check("TLE ~timeout", 2.9 <= r["execution_time_ms"] / 1000.0 <= 5.0, r["execution_time_ms"])
 
 busy = "int main(){ volatile double x = 0; for(;;) x += 1.0; return 0; }"
-r = client.post("/api/run", json={"code": busy, "language": "c"}).json()
+r = run_sandbox(busy, "c", "", 3.0)
 check("CPU-burn TLE", r["status"] == "time_limit_exceeded", r["status"])
 
 # Safe multi-process spawn test (ensures process group kill works without exhausting OS PID limits)
@@ -83,7 +93,7 @@ fork_bomb = """
 #include <unistd.h>
 int main(){ for (int i = 0; i < 3; i++) { fork(); } for(;;); return 0; }
 """
-r = client.post("/api/run", json={"code": fork_bomb, "language": "c"}).json()
+r = run_sandbox(fork_bomb, "c", "", 3.0)
 check("fork+spin killed", r["status"] in ("time_limit_exceeded", "runtime_error"), r["status"])
 _ps = __import__("subprocess").run(["ps", "-eo", "stat,comm"], capture_output=True, text=True).stdout.splitlines()
 _zombies = [ln for ln in _ps if ln.split() and ln.split()[-1] == "solution" and ln.split()[0].startswith("Z")]
@@ -91,7 +101,7 @@ check("no zombies left", not _zombies, _zombies[:3])
 
 # --- runtime error: segfault --------------------------------------------- #
 segv = "#include <stdlib.h>\nint main(){ int *p = (int*)0; *p = 42; return 0; }"
-r = client.post("/api/run", json={"code": segv, "language": "c"}).json()
+r = run_sandbox(segv, "c")
 check("segv runtime_error", r["status"] == "runtime_error", r["status"])
 check("segv signal name", r["signal_name"] == "SIGSEGV", r["signal_name"])
 check("segv signal detail in stderr", "SIGSEGV" in r["stderr"], r["stderr"][-140:])
@@ -105,7 +115,7 @@ memset(p, 1, 1024u*1024u*64u); char *q = malloc(1024u*1024u*64u); if(!q) return 
 memset(q, 2, 1024u*1024u*64u); char *z = malloc(1024u*1024u*256u);
 return z ? (int)(((volatile char*)p)[0] + ((volatile char*)q)[0] + ((volatile char*)z)[0]) : 3; }
 """
-r = client.post("/api/run", json={"code": alloc, "language": "c"}).json()
+r = run_sandbox(alloc, "c")
 check("oom runtime_error", r["status"] == "runtime_error", (r["status"], r["exit_code"], r["stderr"][-160:]))
 
 cpp_oom = """
@@ -114,7 +124,7 @@ cpp_oom = """
 int main(){ std::vector<char> v; try { for(;;) v.resize(v.size() + (1<<20)); }
 catch (const std::bad_alloc&) { throw; } return 0; }
 """
-r = client.post("/api/run", json={"code": cpp_oom, "language": "cpp"}).json()
+r = run_sandbox(cpp_oom, "cpp")
 check("cpp bad_alloc runtime_error", r["status"] == "runtime_error", (r["status"], r["stderr"][-200:]))
 check("cpp bad_alloc mentions memory", "memory" in r["stderr"].lower(), r["stderr"][-200:])
 
@@ -163,15 +173,15 @@ check("memory verdict falls back to the global limit",
       f"memory limit of {mb} MB" in result.stderr, result.stderr[-140:])
 
 # --- nonzero exit --------------------------------------------------------- #
-r = client.post("/api/run", json={"code": "int main(){ return 7; }", "language": "c"}).json()
+r = run_sandbox("int main(){ return 7; }", "c")
 check("nonzero exit -> runtime_error", r["status"] == "runtime_error" and r["exit_code"] == 7, r)
 
 # --- output volume / no stdin --------------------------------------------- #
 spam = "#include <stdio.h>\nint main(){ for(long i=0;i<400000;i++) puts(\"01234567890123456789\"); return 0; }"
-r = client.post("/api/run", json={"code": spam, "language": "c"}).json()
+r = run_sandbox(spam, "c")
 check("output truncated", r["status"] == "success" and r["truncated"], (len(r["stdout"]), r["truncated"]))
 
-r = client.post("/api/run", json={"code": "#include <stdio.h>\n#include <stdlib.h>\nint main(){ puts(getenv(\"PATH\")?\"env-ok\":\"no-env\"); }", "language": "c"}).json()
+r = run_sandbox("#include <stdio.h>\n#include <stdlib.h>\nint main(){ puts(getenv(\"PATH\")?\"env-ok\":\"no-env\"); }", "c")
 check("runs with stdin omitted", r["status"] == "success" and "env-ok" in r["stdout"], r)
 
 # --- detached descendant must never hang the judge ------------------------ #
@@ -189,7 +199,7 @@ int main(void) {
 }
 """
 _t0 = time.perf_counter()
-r = client.post("/api/run", json={"code": orphan_src, "language": "c", "stdin": "x" * 190_000}).json()
+r = run_sandbox(orphan_src, "c", "x" * 190_000, 10.0)
 _elapsed = time.perf_counter() - _t0
 check(
     "orphan holding stdout does not hang the judge",
@@ -201,10 +211,7 @@ check(
 # caller then blocked forever closing that same pipe. 190_000 bytes is more than
 # one pipe buffer, so the write really does block.
 _t0 = time.perf_counter()
-r = client.post(
-    "/api/run",
-    json={"code": "int main(){ return 0; }", "language": "c", "stdin": "x" * 190_000},
-).json()
+r = run_sandbox("int main(){ return 0; }", "c", "x" * 190_000, 10.0)
 _elapsed = time.perf_counter() - _t0
 check(
     "unconsumed huge stdin returns promptly",
@@ -225,7 +232,7 @@ int main(void) {
     return 0;
 }
 """
-r = client.post("/api/run", json={"code": fork_src, "language": "c"}).json()
+r = run_sandbox(fork_src, "c")
 _created = r["stdout"].count("failures=")
 check(
     "fork bomb cannot outgrow the task limit",
@@ -234,20 +241,14 @@ check(
 )
 
 # --- validation ----------------------------------------------------------- #
-r = client.post("/api/run", json={"code": "int main(){}", "language": "python"})
-check("bad language 422", r.status_code == 422, r.status_code)
-r = client.post("/api/run", json={"code": "int main(){}"})
-check("missing language 422", r.status_code == 422, r.status_code)
+check("bad language rejected safely", compiler.run_code("int main(){}", "python", "", 5.0).status == "internal_error")
 
 # --- concurrency / leak check --------------------------------------------- #
 import concurrent.futures as cf
 
 
 def one(i: int) -> str:
-    return client.post(
-        "/api/run",
-        json={"code": "#include <unistd.h>\nint main(){ usleep(300000); return 0; }", "language": "c"},
-    ).json()["status"]
+    return run_sandbox("#include <unistd.h>\nint main(){ usleep(300000); return 0; }", "c")["status"]
 
 
 with cf.ThreadPoolExecutor(max_workers=8) as pool:

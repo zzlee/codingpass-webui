@@ -418,8 +418,7 @@ check("GET /api/health still ok", r.status_code == 200 and r.json()["status"] ==
 r = client.post("/api/run", json={
     "code": "#include <stdio.h>\nint main(){printf(\"%d\\n\",6*7);return 0;}",
     "language": "c", "stdin": ""})
-check("POST /api/run still works unauthenticated",
-      r.status_code == 200 and r.json()["stdout"].strip() == "42", r.text[:160])
+check("POST /api/run is removed (404)", r.status_code == 404, r.status_code)
 r = client.get("/api/config")
 check("GET /api/config advertises roles", "teacher" in r.json()["roles"], r.json().get("roles"))
 leftovers = list(pathlib.Path("/tmp").glob("cj-*"))

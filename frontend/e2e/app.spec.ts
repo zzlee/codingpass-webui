@@ -208,7 +208,7 @@ test.describe('CodingPass WebUI E2E Test Suite', () => {
     await expect(page.getByText('CodingPass AI 智慧出題 Agent')).not.toBeVisible()
   })
 
-  test('Student custom test case debug execution in ProblemSolver', async ({ page }) => {
+  test('Student cannot compile via server without Local Agent and receives clear guidance', async ({ page }) => {
     await page.goto('/')
 
     // Sign in as student Alice
@@ -231,28 +231,27 @@ test.describe('CodingPass WebUI E2E Test Suite', () => {
     await expect(customTab).toBeVisible({ timeout: 15000 })
     await customTab.click()
 
-    // Verify CustomTestPanel is displayed
-    const stdinArea = page.locator('[data-testid="custom-stdin-input"]')
-    await expect(stdinArea).toBeVisible({ timeout: 5000 })
+    // Verify CustomTestPanel is displayed with Local Agent disconnected indicators
+    await expect(page.getByText('🔴 Local Agent 未連線（需本機編譯）')).toBeVisible({ timeout: 5000 })
+    await expect(page.getByText('伺服器不開放學生直接編譯')).toBeVisible()
 
-    // Clear and type custom test input: "15 27\n"
-    await stdinArea.fill('15 27\n')
-
-    // Click Run Custom Input and wait for /api/run response
+    // Verify Run Custom Input button is disabled without Local Agent
     const runBtn = page.locator('[data-testid="btn-run-custom"]')
     await expect(runBtn).toBeVisible()
-    await Promise.all([
-      page.waitForResponse((res) => res.url().includes('/api/run') && res.status() === 200, { timeout: 15000 }),
-      runBtn.click(),
-    ])
+    await expect(runBtn).toBeDisabled()
 
-    // Verify execution completes with SUCCESS and stdout is visible
-    await expect(page.getByText('SUCCESS', { exact: true })).toBeVisible({ timeout: 10000 })
-    await expect(page.getByText('標準輸出 (Stdout)')).toBeVisible()
-
-    // Switch back to "範例評測與成績" tab
+    // Switch back to "範例評測與成績" tab and verify Run Samples warns about Local Agent requirement
     const samplesTab = page.locator('[data-testid="tab-samples"]')
     await samplesTab.click()
     await expect(page.getByText('No result yet')).toBeVisible()
+
+    const runSamplesBtn = page.getByRole('button', { name: /Run Samples/ })
+    await expect(runSamplesBtn).toBeVisible()
+    await runSamplesBtn.click()
+
+    // Verify notification informs student that Local Agent is required and server does not compile
+    await expect(
+      page.getByText('未連線本機 Local Agent：學生端測試與除錯須於本機編譯執行，伺服器不提供直接編譯測試。'),
+    ).toBeVisible({ timeout: 5000 })
   })
 })
