@@ -25,6 +25,7 @@ import {
   EyeOff,
   FileText,
   Gauge,
+  History,
   Layers,
   LoaderCircle,
   Lock,
@@ -42,6 +43,7 @@ import CustomTestPanel, { type CustomTestResult } from './CustomTestPanel'
 import ExamLockdownOverlay from './ExamLockdownOverlay'
 import Markdown from './Markdown'
 import ResultPanel from './ResultPanel'
+import RevisionHistoryModal, { saveProblemRevision } from './RevisionHistoryModal'
 import { CopyButton, DifficultyBadge, EmptyState, ErrorNotice, MetaChip, Segmented, Spinner } from './ui'
 import { useAuth } from '../authContext'
 import { useCtrlEnter } from '../shortcuts'
@@ -113,6 +115,15 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
   const [customStdin, setCustomStdin] = useState<string>('')
   const [customResult, setCustomResult] = useState<CustomTestResult | null>(null)
   const [runningCustom, setRunningCustom] = useState(false)
+  const [historyOpen, setHistoryOpen] = useState(false)
+
+  const takeSnapshot = useCallback((trigger: 'run_custom' | 'run_samples' | 'submit' | 'manual') => {
+    const current = stateRef.current
+    const detail = current.problem
+    if (!detail) return
+    const source = current.sources[current.language]
+    saveProblemRevision(detail.id, source, current.language, trigger)
+  }, [])
 
   // Mirrors for the keyboard handler so `Ctrl+Enter` never reads a stale value.
   // The agent handle is mirrored too: `runSamples` has no reactive dependencies,
@@ -228,6 +239,7 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
     }
 
     busyRef.current = true
+    takeSnapshot('run_samples')
     setRunningSamples(true)
     setActiveTab('samples')
     setNotice(null)
@@ -279,6 +291,7 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
     if (!detail || busyRef.current) return
 
     busyRef.current = true
+    takeSnapshot('submit')
     setSubmitting(true)
     setActiveTab('samples')
     setNotice(null)
@@ -324,6 +337,7 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
     }
 
     busyRef.current = true
+    takeSnapshot('run_custom')
     setRunningCustom(true)
     setNotice(null)
     setActiveTab('custom')
@@ -586,6 +600,15 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
                 <RotateCcw className="h-3 w-3" aria-hidden="true" />
                 Starter
               </button>
+              <button
+                type="button"
+                onClick={() => setHistoryOpen(true)}
+                title="檢視此題目的程式碼版本歷程與快速還原"
+                className={buttonClass('ghost', 'px-2 py-1 text-[11px] gap-1 text-slate-300 hover:text-white')}
+              >
+                <History className="h-3 w-3 text-indigo-400" aria-hidden="true" />
+                <span>版本歷程</span>
+              </button>
 
               <div className="ml-auto flex flex-wrap items-center gap-2">
                 {progress ? (
@@ -747,7 +770,7 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
                   localAgent.status === 'connected' ? (
                     <span className="text-emerald-400">⚡ 本機 Local Agent 編譯</span>
                   ) : (
-                    <span className="text-rose-400">🔴 Local Agent 未連線（需本機編譯）</span>
+                    <span className="text-rose-400">本機編譯模式（需 Local Agent）</span>
                   )
                 ) : (
                   <span>{problem.sample_count} sample · {problem.hidden_count} hidden</span>
@@ -767,6 +790,9 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
                   sampleCases={samples}
                   localAgentConnected={localAgent.status === 'connected'}
                   timeLimitSec={problem.time_limit_sec}
+                  code={code}
+                  language={language}
+                  onBeforeRun={takeSnapshot}
                 />
               ) : report ? (
                 <div className="h-full min-h-0">
@@ -816,6 +842,18 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
       {problem.is_exam && user?.role === 'student' ? (
         <ExamLockdownOverlay problem={problem} onForceSubmitted={onBack} />
       ) : null}
+
+      <RevisionHistoryModal
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        problemId={problem.id}
+        currentCode={code}
+        onRestore={(restoredCode, restoredLanguage) => {
+          setLanguage(restoredLanguage)
+          setSources((prev) => ({ ...prev, [restoredLanguage]: restoredCode }))
+          setNotice(`已成功還原程式碼快照 (${restoredLanguage.toUpperCase()})`)
+        }}
+      />
     </div>
   )
 }

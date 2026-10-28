@@ -16,13 +16,14 @@ import { useCallback, useState } from 'react'
 
 import AuthProvider, { useAuth } from './authContext'
 import WorkspaceProvider from './workspaceContext'
-import { LocalAgentProvider } from './localAgentContext'
+import { LocalAgentProvider, useLocalAgent } from './localAgentContext'
 import Header from './components/Header'
 import Playground from './components/Playground'
 import ProblemBank from './components/ProblemBank'
 import ProblemSolver from './components/ProblemSolver'
 import Classrooms from './components/Classrooms'
 import Submissions from './components/Submissions'
+import AgentModal from './components/AgentModal'
 import AuthModal from './components/AuthModal'
 import AuthGate from './components/AuthGate'
 import { LoadingRow } from './components/ui'
@@ -45,6 +46,7 @@ const AUTH_GATES: Record<Exclude<AppTab, 'playground'>, { title: string; hint: s
 
 function Shell() {
   const { user, ready } = useAuth()
+  const { isModalOpen, closeModal, modalTab } = useLocalAgent()
   const [tab, setTab] = useState<AppTab>('playground')
   /** Open problem plus the account that opened it. */
   const [opened, setOpened] = useState<{ id: number; ownerId: number | null } | null>(null)
@@ -100,6 +102,7 @@ function Shell() {
       </main>
 
       <AuthModal open={authOpen} onClose={() => setAuthOpen(false)} />
+      <AgentModal open={isModalOpen} onClose={closeModal} initialTab={modalTab} />
     </div>
   )
 }

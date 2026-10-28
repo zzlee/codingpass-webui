@@ -1,5 +1,5 @@
-import React, { createContext, useContext, useEffect, useRef, useState } from 'react'
-import type { JudgeStatus, Language, RunResponse } from './types'
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'
+import type { DoctorReport, JudgeStatus, Language, RunResponse } from './types'
 
 export type AgentStatus = 'connected' | 'connecting' | 'disconnected'
 
@@ -31,6 +31,11 @@ export interface LocalAgentContextValue {
   runLocally: (payload: LocalRunPayload) => Promise<RunResponse>
   runBatchLocally: (payload: LocalBatchRunPayload) => Promise<RunResponse[]>
   checkConnection: () => void
+  doctor: () => Promise<DoctorReport>
+  isModalOpen: boolean
+  modalTab: 'setup' | 'doctor'
+  openModal: (tab?: 'setup' | 'doctor') => void
+  closeModal: () => void
   startExamLock: (ticket?: string, timeoutSec?: number) => Promise<{ locked: boolean; token: string; is_windows: boolean }>
   releaseExamLock: () => Promise<void>
   heartbeatExamLock: () => Promise<boolean>
@@ -191,12 +196,29 @@ type PendingRequest =
       resolve: (data: any) => void
       reject: (error: Error) => void
     }
+  | {
+      kind: 'doctor'
+      timer: number
+      resolve: (data: DoctorReport) => void
+      reject: (error: Error) => void
+    }
 
 export function LocalAgentProvider({ children }: { children: React.ReactNode }) {
   const [status, setStatus] = useState<AgentStatus>('disconnected')
   const [compilerInfo, setCompilerInfo] = useState<string | null>(null)
   const [agentVersion, setAgentVersion] = useState<string | null>(null)
   const [examLocked, setExamLocked] = useState<boolean>(false)
+  const [isModalOpen, setIsModalOpen] = useState<boolean>(false)
+  const [modalTab, setModalTab] = useState<'setup' | 'doctor'>('setup')
+
+  const openModal = useCallback((tab: 'setup' | 'doctor' = 'setup') => {
+    setModalTab(tab)
+    setIsModalOpen(true)
+  }, [])
+
+  const closeModal = useCallback(() => {
+    setIsModalOpen(false)
+  }, [])
 
   const wsRef = useRef<WebSocket | null>(null)
   const pendingRequests = useRef<Map<string, PendingRequest>>(new Map())
@@ -279,6 +301,12 @@ export function LocalAgentProvider({ children }: { children: React.ReactNode }) 
           }
           settle(reqId, (pending) => {
             if (pending.kind === 'exam') pending.resolve(data)
+          })
+        } else if (type === 'doctor_report') {
+          settle(reqId, (pending) => {
+            if (pending.kind === 'doctor') {
+              pending.resolve(data.report as DoctorReport)
+            }
           })
         } else if (type === 'error') {
           // The agent rejects a malformed request (e.g. a non-array stdin_list)
@@ -509,6 +537,29 @@ export function LocalAgentProvider({ children }: { children: React.ReactNode }) 
     })
   }
 
+  const doctor = (): Promise<DoctorReport> => {
+    const ws = openSocket()
+    if (!ws) {
+      return Promise.reject(new Error('未連接 Local Agent。請先啟動 run_agent.sh 或 run_agent.bat。'))
+    }
+    const id = nextRequestId()
+    return new Promise((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        pendingRequests.current.delete(id)
+        reject(new Error('Local Agent 工具鏈診斷超時'))
+      }, 10_000)
+
+      pendingRequests.current.set(id, {
+        kind: 'doctor',
+        timer,
+        resolve,
+        reject,
+      })
+
+      ws.send(JSON.stringify({ type: 'doctor', id }))
+    })
+  }
+
   return (
     <LocalAgentContext.Provider
       value={{
@@ -519,6 +570,11 @@ export function LocalAgentProvider({ children }: { children: React.ReactNode }) 
         runLocally,
         runBatchLocally,
         checkConnection: connect,
+        doctor,
+        isModalOpen,
+        modalTab,
+        openModal,
+        closeModal,
         startExamLock,
         releaseExamLock,
         heartbeatExamLock,

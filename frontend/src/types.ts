@@ -49,6 +49,30 @@ export interface RunResponse {
   truncated: boolean
 }
 
+/** Diagnostic result of a compiler probe. */
+export interface ToolchainCheck {
+  found: boolean
+  path: string | null
+  version: string
+}
+
+/** Comprehensive diagnostic report from CodingPass Local Agent. */
+export interface DoctorReport {
+  status: 'ok' | 'degraded' | 'missing_toolchain'
+  os: string
+  arch: string
+  python_version: string
+  temp_dir: {
+    path: string
+    writable: boolean
+  }
+  c_compiler: ToolchainCheck
+  cpp_compiler: ToolchainCheck & {
+    cpp17_supported: boolean
+  }
+  suggestions: string[]
+}
+
 /** `GET /api/health` response body. */
 export interface HealthResponse {
   status: 'ok' | 'degraded'

@@ -28,7 +28,6 @@ import {
 } from 'lucide-react'
 
 import { RoleBadge } from './ui'
-import AgentModal from './AgentModal'
 import ChangePasswordModal from './ChangePasswordModal'
 import UserManagementModal from './UserManagementModal'
 import { APP_TABS } from '../tabs'
@@ -357,7 +356,7 @@ export interface HeaderProps {
 export function Header({ activeTab, onTabChange, onSignIn }: HeaderProps) {
   const { health, checkHealth } = useWorkspace()
   const { user, ready } = useAuth()
-  const [agentModalOpen, setAgentModalOpen] = useState(false)
+  const { openModal: openAgentModal } = useLocalAgent()
   const [changePasswordOpen, setChangePasswordOpen] = useState(false)
   const [userManagementOpen, setUserManagementOpen] = useState(false)
 
@@ -439,7 +438,7 @@ export function Header({ activeTab, onTabChange, onSignIn }: HeaderProps) {
                 <span className="xl:hidden">帳號</span>
               </button>
             ) : null}
-            <LocalAgentPill onOpenModal={() => setAgentModalOpen(true)} />
+            <LocalAgentPill onOpenModal={() => openAgentModal('setup')} />
             <HealthPill health={health} onHealthCheck={() => void checkHealth()} />
             <AccountArea
               onSignIn={onSignIn}
@@ -449,7 +448,6 @@ export function Header({ activeTab, onTabChange, onSignIn }: HeaderProps) {
           </div>
         </div>
       </header>
-      <AgentModal open={agentModalOpen} onClose={() => setAgentModalOpen(false)} />
       <ChangePasswordModal open={changePasswordOpen} onClose={() => setChangePasswordOpen(false)} />
       <UserManagementModal open={userManagementOpen} onClose={() => setUserManagementOpen(false)} />
     </>

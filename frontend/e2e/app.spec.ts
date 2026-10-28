@@ -254,4 +254,95 @@ test.describe('CodingPass WebUI E2E Test Suite', () => {
       page.getByText('未連線本機 Local Agent：學生端測試與除錯須於本機編譯執行，伺服器不提供直接編譯測試。'),
     ).toBeVisible({ timeout: 5000 })
   })
+
+  test('Local Agent Toolchain Doctor opens and displays diagnostics and install guides', async ({ page }) => {
+    await page.goto('/')
+
+    // Click local agent pill in header
+    const agentPill = page.getByRole('button', { name: /本地加速/ })
+    await agentPill.click()
+
+    // Switch to Doctor tab
+    const doctorTab = page.getByRole('button', { name: /本機工具鏈一鍵診斷/ })
+    await expect(doctorTab).toBeVisible()
+    await doctorTab.click()
+
+    // Verify diagnostic recommendations and install commands are present
+    await expect(page.getByText('本機 C/C++ 編譯工具鏈健全性診斷')).toBeVisible()
+    await expect(page.getByText('跨平台編譯器一鍵安裝指令')).toBeVisible()
+    await expect(page.getByText('winget install MSYS2.MSYS2')).toBeVisible()
+    await expect(page.getByText('xcode-select --install')).toBeVisible()
+
+    // Close modal
+    await page.getByRole('button', { name: '關閉' }).click()
+  })
+
+  test('Multi-Case Custom Testing allows adding, renaming, and importing sample cases', async ({ page }) => {
+    await page.goto('/')
+
+    // Sign in as Alice
+    const accountTrigger = page.locator('button[aria-haspopup="menu"]')
+    await accountTrigger.click()
+    await page.getByRole('menuitem', { name: /Alice/ }).click()
+
+    // Navigate to Problem Bank and open Two Sum
+    await page.getByRole('button', { name: /Problem Bank/ }).click()
+    await Promise.all([
+      page.waitForResponse((res) => res.url().includes('/api/problems/1') && res.status() === 200),
+      page.locator('[data-testid="problem-card-1"]').click(),
+    ])
+
+    // Switch to custom tab
+    const customTab = page.locator('[data-testid="tab-custom"]')
+    await expect(customTab).toBeVisible()
+    await customTab.click()
+
+    // Verify initial case #1 exists
+    await expect(page.getByText('自訂測資 #1')).toBeVisible()
+
+    // Click "+ 新增測資"
+    const addCaseBtn = page.getByRole('button', { name: /新增測資/ })
+    await expect(addCaseBtn).toBeVisible()
+    await addCaseBtn.click()
+
+    // Verify case #2 appears
+    await expect(page.getByText('自訂測資 #2')).toBeVisible()
+
+    // Test import all samples
+    const importAllBtn = page.getByRole('button', { name: /匯入全部範例/ })
+    await expect(importAllBtn).toBeVisible()
+    await importAllBtn.click()
+
+    // Verify imported sample tabs
+    await expect(page.getByText('範例 #1')).toBeVisible()
+    await expect(page.getByText('範例 #2')).toBeVisible()
+  })
+
+  test('Code Revision History modal opens and allows viewing snapshots and restoring code', async ({ page }) => {
+    await page.goto('/')
+
+    // Sign in as Alice
+    const accountTrigger = page.locator('button[aria-haspopup="menu"]')
+    await accountTrigger.click()
+    await page.getByRole('menuitem', { name: /Alice/ }).click()
+
+    // Open Two Sum
+    await page.getByRole('button', { name: /Problem Bank/ }).click()
+    await Promise.all([
+      page.waitForResponse((res) => res.url().includes('/api/problems/1') && res.status() === 200),
+      page.locator('[data-testid="problem-card-1"]').click(),
+    ])
+
+    // Click "版本歷程" button
+    const historyBtn = page.getByRole('button', { name: /版本歷程/ })
+    await expect(historyBtn).toBeVisible()
+    await historyBtn.click()
+
+    // Verify Revision modal opened
+    await expect(page.getByText('程式碼版本歷程與還原')).toBeVisible()
+
+    // Close modal
+    await page.getByRole('button', { name: '關閉' }).click()
+    await expect(page.getByText('程式碼版本歷程與還原')).not.toBeVisible()
+  })
 })

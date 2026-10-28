@@ -127,7 +127,14 @@ def test_unit() -> None:
     assert bad_batch["status"] == "compile_error", bad_batch
     assert bad_batch["results"] == [], bad_batch
 
-    print("\n[8] Origin whitelist (is_allowed_origin):")
+    print("\n[8] Doctor diagnostic report:")
+    doc = agent_module.run_doctor()
+    print("    Doctor status:", doc["status"], "| OS:", doc["os"], "| C compiler:", doc["c_compiler"]["found"], "| C++17:", doc["cpp_compiler"].get("cpp17_supported"))
+    assert doc["status"] in ("ok", "degraded", "missing_toolchain")
+    assert "temp_dir" in doc and doc["temp_dir"]["writable"] is True
+    assert isinstance(doc["suggestions"], list)
+
+    print("\n[9] Origin whitelist (is_allowed_origin):")
     must_allow = [
         None,
         "",
@@ -417,6 +424,18 @@ int main() {
         ], batch_res
         assert all(r["status"] == "success" for r in batch_res["results"]), batch_res
         print("    run_batch (single compile, 4 cases) passed!")
+
+        # --- Doctor diagnostic request --------------------------------------
+        doc_res = await send_and_read(
+            writer,
+            reader,
+            {"type": "doctor", "id": "doc-1"},
+        )
+        print("    Doctor response:", doc_res["type"], doc_res["report"]["status"])
+        assert doc_res["type"] == "doctor_report", doc_res
+        assert doc_res["id"] == "doc-1", doc_res
+        assert doc_res["report"]["status"] in ("ok", "degraded", "missing_toolchain"), doc_res
+        print("    doctor protocol passed!")
 
         writer.close()
         await writer.wait_closed()

@@ -195,6 +195,99 @@ def get_compiler_info() -> str:
     return _COMPILER_INFO_CACHE
 
 
+def run_doctor() -> Dict[str, Any]:
+    """Run comprehensive diagnostic on student's local toolchain environment."""
+    import platform
+
+    os_name = sys.platform
+    arch = platform.machine()
+    python_ver = sys.version.split()[0]
+
+    # Temp dir check
+    temp_dir = tempfile.gettempdir()
+    temp_writable = False
+    try:
+        test_file = Path(temp_dir) / f"_cp_doctor_test_{os.getpid()}.tmp"
+        test_file.write_text("ok", encoding="utf-8")
+        if test_file.read_text(encoding="utf-8") == "ok":
+            temp_writable = True
+        test_file.unlink(missing_ok=True)
+    except Exception:
+        temp_writable = False
+
+    # Check C compiler
+    c_path = find_compiler("c")
+    c_info: Dict[str, Any] = {"found": bool(c_path), "path": c_path, "version": ""}
+    if c_path:
+        try:
+            p = subprocess.run([c_path, "--version"], capture_output=True, text=True, timeout=2.0)
+            c_info["version"] = p.stdout.splitlines()[0] if p.stdout else c_path
+        except Exception as e:
+            c_info["version"] = f"probe failed: {e}"
+
+    # Check C++ compiler
+    cpp_path = find_compiler("cpp")
+    cpp_info: Dict[str, Any] = {"found": bool(cpp_path), "path": cpp_path, "version": "", "cpp17_supported": False}
+    if cpp_path:
+        try:
+            p = subprocess.run([cpp_path, "--version"], capture_output=True, text=True, timeout=2.0)
+            cpp_info["version"] = p.stdout.splitlines()[0] if p.stdout else cpp_path
+        except Exception as e:
+            cpp_info["version"] = f"probe failed: {e}"
+
+        # Test C++17 support
+        try:
+            p = subprocess.run(
+                [cpp_path, "-std=c++17", "-E", "-x", "c++", "-"],
+                input=b"#include <vector>\nint main(){ return 0; }",
+                capture_output=True,
+                timeout=3.0,
+            )
+            cpp_info["cpp17_supported"] = (p.returncode == 0)
+        except Exception:
+            cpp_info["cpp17_supported"] = False
+
+    # Assess overall status
+    if c_info["found"] and cpp_info["found"] and cpp_info["cpp17_supported"] and temp_writable:
+        status = "ok"
+    elif c_info["found"] or cpp_info["found"]:
+        status = "degraded"
+    else:
+        status = "missing_toolchain"
+
+    # Actionable suggestions
+    suggestions: List[str] = []
+    if status == "missing_toolchain":
+        if os_name == "win32":
+            suggestions.append("Windows 建議：在 PowerShell 執行 'winget install MSYS2.MSYS2' 安裝 MSYS2，或下載 MinGW-w64 並將 bin 加入 PATH。")
+            suggestions.append("或在 CodingPass 下載頁面取得包含 w64devkit 的一鍵懶人包。")
+        elif os_name == "darwin":
+            suggestions.append("macOS 建議：開啟終端機執行 'xcode-select --install' 安裝 Command Line Tools (包含 Clang/GCC)。")
+            suggestions.append("或使用 Homebrew 執行 'brew install gcc'。")
+        else:
+            suggestions.append("Linux 建議：在終端機執行 'sudo apt update && sudo apt install -y build-essential' (Ubuntu/Debian)。")
+    elif status == "degraded":
+        if not cpp_info["found"]:
+            suggestions.append("未找到 G++ 編譯器，無法編譯 C++ 程式碼。請安裝完整 GCC/G++ 套件。")
+        elif not cpp_info["cpp17_supported"]:
+            suggestions.append("目前 G++ 版本過舊，未完整支援 C++17 標準。建議更新至 GCC 9 或以上版本。")
+        if not temp_writable:
+            suggestions.append(f"系統暫存目錄 ({temp_dir}) 無寫入權限，請確認權限設定。")
+    else:
+        suggestions.append("本機工具鏈健全！支援 C 與 C++17 完整標準編譯與執行。")
+
+    return {
+        "status": status,
+        "os": os_name,
+        "arch": arch,
+        "python_version": python_ver,
+        "temp_dir": {"path": temp_dir, "writable": temp_writable},
+        "c_compiler": c_info,
+        "cpp_compiler": cpp_info,
+        "suggestions": suggestions,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Sandbox-lite execution primitives
 # ---------------------------------------------------------------------------
@@ -1073,6 +1166,20 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                             "type": "pong",
                             "version": VERSION,
                             "compiler": compiler_info,
+                        }
+                    )
+                )
+
+            elif msg_type == "doctor":
+                req_id = data.get("id")
+                loop = asyncio.get_running_loop()
+                doctor_report = await loop.run_in_executor(None, run_doctor)
+                await ws.send_text(
+                    json.dumps(
+                        {
+                            "type": "doctor_report",
+                            "id": req_id,
+                            "report": doctor_report,
                         }
                     )
                 )
