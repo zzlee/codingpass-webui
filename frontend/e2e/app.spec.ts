@@ -207,4 +207,52 @@ test.describe('CodingPass WebUI E2E Test Suite', () => {
     await page.locator('button[aria-label="Close dialog"]').click()
     await expect(page.getByText('CodingPass AI 智慧出題 Agent')).not.toBeVisible()
   })
+
+  test('Student custom test case debug execution in ProblemSolver', async ({ page }) => {
+    await page.goto('/')
+
+    // Sign in as student Alice
+    const accountTrigger = page.locator('button[aria-haspopup="menu"]')
+    await accountTrigger.click()
+    await page.getByRole('menuitem', { name: /Alice/ }).click()
+    await expect(accountTrigger).toContainText('Alice')
+
+    // Navigate to Problem Bank tab
+    await page.getByRole('button', { name: /Problem Bank/ }).click()
+
+    // Open Two Sum problem and wait for problem response
+    await Promise.all([
+      page.waitForResponse((res) => res.url().includes('/api/problems/1') && res.status() === 200),
+      page.locator('[data-testid="problem-card-1"]').click(),
+    ])
+
+    // Wait for solver tab buttons to appear
+    const customTab = page.locator('[data-testid="tab-custom"]')
+    await expect(customTab).toBeVisible({ timeout: 15000 })
+    await customTab.click()
+
+    // Verify CustomTestPanel is displayed
+    const stdinArea = page.locator('[data-testid="custom-stdin-input"]')
+    await expect(stdinArea).toBeVisible({ timeout: 5000 })
+
+    // Clear and type custom test input: "15 27\n"
+    await stdinArea.fill('15 27\n')
+
+    // Click Run Custom Input and wait for /api/run response
+    const runBtn = page.locator('[data-testid="btn-run-custom"]')
+    await expect(runBtn).toBeVisible()
+    await Promise.all([
+      page.waitForResponse((res) => res.url().includes('/api/run') && res.status() === 200, { timeout: 15000 }),
+      runBtn.click(),
+    ])
+
+    // Verify execution completes with SUCCESS and stdout is visible
+    await expect(page.getByText('SUCCESS', { exact: true })).toBeVisible({ timeout: 10000 })
+    await expect(page.getByText('標準輸出 (Stdout)')).toBeVisible()
+
+    // Switch back to "範例評測與成績" tab
+    const samplesTab = page.locator('[data-testid="tab-samples"]')
+    await samplesTab.click()
+    await expect(page.getByText('No result yet')).toBeVisible()
+  })
 })

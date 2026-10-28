@@ -268,6 +268,7 @@ export function ProblemBank({ onOpen }: ProblemBankProps) {
               <li key={problem.id}>
                 <button
                   type="button"
+                  data-testid={`problem-card-${problem.id}`}
                   onClick={() => onOpen(problem.id)}
                   className="group flex h-full w-full flex-col gap-2 rounded-xl border border-slate-800 bg-slate-900/40 p-3 text-left transition-colors hover:border-sky-500/60 hover:bg-slate-900/70 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
                 >

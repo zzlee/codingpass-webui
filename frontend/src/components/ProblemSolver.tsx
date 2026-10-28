@@ -30,12 +30,14 @@ import {
   Play,
   RotateCcw,
   Send,
+  Terminal,
   Trophy,
 } from 'lucide-react'
 
 import '../monacoSetup'
 import { EDITOR_OPTIONS, EDITOR_THEME } from '../monacoSetup'
 import AITutorPanel from './AITutorPanel'
+import CustomTestPanel, { type CustomTestResult } from './CustomTestPanel'
 import ExamLockdownOverlay from './ExamLockdownOverlay'
 import Markdown from './Markdown'
 import ResultPanel from './ResultPanel'
@@ -113,15 +115,20 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
   const [openingPdf, setOpeningPdf] = useState(false)
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null)
 
+  const [activeTab, setActiveTab] = useState<'samples' | 'custom'>('samples')
+  const [customStdin, setCustomStdin] = useState<string>('')
+  const [customResult, setCustomResult] = useState<CustomTestResult | null>(null)
+  const [runningCustom, setRunningCustom] = useState(false)
+
   // Mirrors for the keyboard handler so `Ctrl+Enter` never reads a stale value.
   // The agent handle is mirrored too: `runSamples` has no reactive dependencies,
   // so reading `localAgent` from its closure would freeze the first render's
   // 'disconnected' status and the local path would never be taken.
-  const stateRef = useRef({ language, sources, problem, localAgent })
+  const stateRef = useRef({ language, sources, problem, localAgent, activeTab, customStdin })
   const busyRef = useRef(false)
 
   useEffect(() => {
-    stateRef.current = { language, sources, problem, localAgent }
+    stateRef.current = { language, sources, problem, localAgent, activeTab, customStdin }
   })
 
   /* ---------------------------------------------------------------- load */
@@ -144,6 +151,12 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
         } else {
           setLanguage('c')
           setSources({ c: detail.starter_code_c, cpp: detail.starter_code_cpp })
+        }
+
+        // Prefill custom test input with first sample case if available
+        const firstSample = detail.test_cases.find((tc) => tc.is_sample)
+        if (firstSample) {
+          setCustomStdin((prev) => (prev ? prev : firstSample.input))
         }
       } catch (reason) {
         if (!cancelled) {
@@ -215,6 +228,7 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
 
     busyRef.current = true
     setRunningSamples(true)
+    setActiveTab('samples')
     setNotice(null)
     setProgress({ done: 0, total: samples.length })
 
@@ -310,6 +324,7 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
 
     busyRef.current = true
     setSubmitting(true)
+    setActiveTab('samples')
     setNotice(null)
     try {
       const result = await api.submit(
@@ -327,8 +342,77 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
     }
   }, [])
 
+  /* --------------------------------------------------- run custom input */
+  /**
+   * Run the current code with custom standard input.
+   *
+   * Executes locally on the student's machine if Local Agent is connected,
+   * otherwise runs on the server scratchpad runner. In neither case is any
+   * submission recorded, no hidden cases are run, and no AI review is executed.
+   */
+  const runCustomInput = useCallback(async (): Promise<void> => {
+    const current = stateRef.current
+    const detail = current.problem
+    const agent = current.localAgent
+    if (!detail || busyRef.current) return
+
+    busyRef.current = true
+    setRunningCustom(true)
+    setNotice(null)
+    setActiveTab('custom')
+
+    const source = current.sources[current.language]
+    const timeoutSec = Math.max(1, Math.ceil(detail.time_limit_sec))
+
+    try {
+      let result: RunResponse | null = null
+      let engine: 'local' | 'server' = 'server'
+
+      if (agent.status === 'connected') {
+        try {
+          result = await agent.runLocally({
+            code: source,
+            language: current.language,
+            stdin: customStdin,
+            timeout_sec: timeoutSec,
+          })
+          engine = 'local'
+        } catch (localErr) {
+          console.warn('Local agent custom run failed, falling back to server judge:', localErr)
+        }
+      }
+
+      if (!result) {
+        result = await api.run(
+          { code: source, language: current.language, stdin: customStdin },
+          sampleTimeout(detail),
+        )
+        engine = 'server'
+      }
+
+      setCustomResult({
+        response: result,
+        error: null,
+        engine,
+      })
+    } catch (err) {
+      setCustomResult({
+        response: null,
+        error: err instanceof ApiError ? err.detail : String(err),
+        engine: 'server',
+      })
+    } finally {
+      setRunningCustom(false)
+      busyRef.current = false
+    }
+  }, [customStdin])
+
   useCtrlEnter(() => {
-    if (!busyRef.current) void runSamples()
+    if (stateRef.current.activeTab === 'custom') {
+      void runCustomInput()
+    } else {
+      void runSamples()
+    }
   })
 
   /* ------------------------------------------------------ statement PDF */
@@ -392,7 +476,7 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
     )
   }
 
-  const busy = runningSamples || submitting
+  const busy = runningSamples || submitting || runningCustom
   const tone = report ? VERDICT_TONE[report.verdict] ?? VERDICT_TONE.runtime_error : null
 
   return (
@@ -562,6 +646,31 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
                 ) : null}
                 <button
                   type="button"
+                  data-testid="btn-custom-test"
+                  onClick={() => {
+                    setActiveTab('custom')
+                    void runCustomInput()
+                  }}
+                  disabled={busy}
+                  title="以自訂標準輸入 (Stdin) 執行目前程式碼 (不計分、不上傳)"
+                  className={buttonClass(
+                    activeTab === 'custom' ? 'subtle' : 'ghost',
+                    `text-xs gap-1.5 ${
+                      activeTab === 'custom'
+                        ? 'border border-indigo-500/60 bg-indigo-500/15 text-indigo-300'
+                        : 'text-slate-300 hover:text-white'
+                    }`,
+                  )}
+                >
+                  {runningCustom ? (
+                    <Spinner className="h-3.5 w-3.5 text-indigo-400" />
+                  ) : (
+                    <Terminal className="h-3.5 w-3.5 text-indigo-400" aria-hidden="true" />
+                  )}
+                  <span>自訂測資</span>
+                </button>
+                <button
+                  type="button"
                   onClick={() => void runSamples()}
                   disabled={busy}
                   title={
@@ -622,29 +731,106 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
                 {problem.sample_count + problem.hidden_count} cases ·{' '}
                 {user?.role === 'student' ? 'recorded' : 'trial run'}
               </span>
-              <span className="ml-auto text-slate-600">Ctrl/Cmd + Enter = Run Samples</span>
+              <span className="ml-auto text-slate-600">
+                Ctrl/Cmd + Enter = {activeTab === 'custom' ? '執行自訂測資' : 'Run Samples'}
+              </span>
             </div>
           </div>
 
-          {/* Result ---------------------------------------------------- */}
-          <div className="min-h-[12rem] lg:max-h-[46%] lg:shrink-0 lg:overflow-hidden">
-            {report ? (
-              <div className="h-full min-h-0">
-                <ResultPanel report={report} notice={notice} />
+          {/* Result Section with Tabs ----------------------------------- */}
+          <div className="flex flex-col min-h-[14rem] lg:max-h-[50%] lg:shrink-0 overflow-hidden rounded-xl border border-slate-800 bg-slate-900/40">
+            {/* Tab header */}
+            <div className="flex shrink-0 items-center justify-between border-b border-slate-800 bg-slate-900/80 px-2.5 py-1.5 text-xs">
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  data-testid="tab-samples"
+                  onClick={() => setActiveTab('samples')}
+                  className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 font-medium transition-colors ${
+                    activeTab === 'samples'
+                      ? 'bg-slate-800 text-slate-100 shadow-sm'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <Layers className="h-3.5 w-3.5 text-emerald-400" />
+                  <span>範例評測與成績</span>
+                  {report ? (
+                    <span className={`ml-1 rounded px-1.5 py-0.2 font-mono text-[10px] ${tone?.pill}`}>
+                      {report.passed}/{report.total}
+                    </span>
+                  ) : null}
+                </button>
+
+                <button
+                  type="button"
+                  data-testid="tab-custom"
+                  onClick={() => setActiveTab('custom')}
+                  className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 font-medium transition-colors ${
+                    activeTab === 'custom'
+                      ? 'bg-slate-800 text-slate-100 shadow-sm'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <Terminal className="h-3.5 w-3.5 text-indigo-400" />
+                  <span>自訂測資偵錯</span>
+                  {customResult?.response ? (
+                    <span
+                      className={`ml-1 rounded px-1.5 py-0.2 font-mono text-[10px] ${
+                        customResult.response.status === 'success'
+                          ? 'bg-emerald-500/20 text-emerald-300'
+                          : 'bg-rose-500/20 text-rose-300'
+                      }`}
+                    >
+                      {customResult.response.status}
+                    </span>
+                  ) : null}
+                </button>
               </div>
-            ) : (
-              <div className="flex h-full items-center justify-center rounded-xl border border-dashed border-slate-800 bg-slate-900/20 px-6 text-center">
-                <EmptyState
-                  icon={<Trophy className="h-8 w-8" aria-hidden="true" />}
-                  title="No result yet"
-                  hint={
-                    samples.length > 0
-                      ? 'Run the samples for instant feedback, then Submit to be graded against the hidden cases too.'
-                      : 'Submit to grade this solution against the problem’s test data.'
-                  }
+
+              <div className="pr-1 font-mono text-[10px] text-slate-500">
+                {activeTab === 'custom' ? (
+                  localAgent.status === 'connected' ? (
+                    <span className="text-emerald-400">⚡ 本機 Local Agent 編譯</span>
+                  ) : (
+                    <span>☁️ 伺服器沙盒暫存</span>
+                  )
+                ) : (
+                  <span>{problem.sample_count} sample · {problem.hidden_count} hidden</span>
+                )}
+              </div>
+            </div>
+
+            {/* Tab content */}
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              {activeTab === 'custom' ? (
+                <CustomTestPanel
+                  stdin={customStdin}
+                  onStdinChange={setCustomStdin}
+                  onRun={runCustomInput}
+                  running={runningCustom}
+                  result={customResult}
+                  sampleCases={samples}
+                  localAgentConnected={localAgent.status === 'connected'}
+                  timeLimitSec={problem.time_limit_sec}
                 />
-              </div>
-            )}
+              ) : report ? (
+                <div className="h-full min-h-0">
+                  <ResultPanel report={report} notice={notice} />
+                </div>
+              ) : (
+                <div className="flex h-full min-h-[12rem] items-center justify-center p-6 text-center">
+                  <EmptyState
+                    icon={<Trophy className="h-8 w-8" aria-hidden="true" />}
+                    title="No result yet"
+                    hint={
+                      samples.length > 0
+                        ? 'Run the samples for instant feedback, switch to Custom Test to run custom stdin, or Submit to grade.'
+                        : 'Submit to grade this solution against the problem’s test data.'
+                    }
+                  />
+                </div>
+              )}
+            </div>
           </div>
 
           {/* AI tutor ---------------------------------------------------- */}

@@ -39,13 +39,13 @@ const INLINE_PATTERN =
 
 /** Inline pass: code, emphasis and links -> React nodes. */
 function parseInline(text: string, keyBase: string): ReactNode[] {
+  const regex = new RegExp(INLINE_PATTERN.source, 'g')
   const nodes: ReactNode[] = []
   let cursor = 0
   let index = 0
 
-  INLINE_PATTERN.lastIndex = 0
   let match: RegExpExecArray | null
-  while ((match = INLINE_PATTERN.exec(text)) !== null) {
+  while ((match = regex.exec(text)) !== null) {
     if (match.index > cursor) nodes.push(text.slice(cursor, match.index))
     const key = `${keyBase}-${index++}`
     const [full, escape, code, boldItalic, bold, italic, boldUnder, strike, linkText, linkHref, url] =
