@@ -176,4 +176,35 @@ test.describe('CodingPass WebUI E2E Test Suite', () => {
     await page.getByRole('button', { name: '關閉' }).click()
     await expect(page.getByText('即時監考儀表板 (Live Exam Proctoring)')).not.toBeVisible()
   })
+
+  test('Teacher AI Problem Generation modal opens and handles presets', async ({ page }) => {
+    await page.goto('/')
+
+    // Sign in as Prof. Chen
+    const accountTrigger = page.locator('button[aria-haspopup="menu"]')
+    await accountTrigger.click()
+    await page.getByRole('menuitem', { name: /Prof\. Chen/ }).click()
+    await expect(accountTrigger).toContainText('Prof. Chen')
+
+    // Navigate to Problem Bank
+    await page.getByRole('button', { name: /Problem Bank/ }).click()
+
+    // Find and click the AI Problem Generation button
+    const aiBtn = page.getByRole('button', { name: /AI 智慧出題/ })
+    await expect(aiBtn).toBeVisible()
+    await aiBtn.click()
+
+    // Modal should be visible
+    await expect(page.getByText('CodingPass AI 智慧出題 Agent')).toBeVisible()
+    await expect(page.getByText('Pi + Qwen3.8 Flash')).toBeVisible()
+
+    // Verify presets exist and clicking one populates the prompt
+    await page.getByRole('button', { name: '區間質數與因數分解' }).click()
+    const promptInput = page.getByPlaceholder('請清楚描述題目情境、演算法核心要求、輸入與輸出規範、邊界數值限制...')
+    await expect(promptInput).toHaveValue(/計算區間內質數個數/)
+
+    // Close the modal
+    await page.locator('button[aria-label="Close dialog"]').click()
+    await expect(page.getByText('CodingPass AI 智慧出題 Agent')).not.toBeVisible()
+  })
 })

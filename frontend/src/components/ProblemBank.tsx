@@ -14,6 +14,7 @@
 import { useMemo, useState } from 'react'
 import {
   BookOpen,
+  Bot,
   Clock,
   Gauge,
   Layers,
@@ -28,6 +29,7 @@ import {
 import { DifficultyBadge, EmptyState, ErrorNotice, LoadingRow, MetaChip, Segmented, Spinner } from './ui'
 import ProblemCreateModal from './ProblemCreateModal'
 import ImportPackModal from './ImportPackModal'
+import AIGenerateProblemModal from './AIGenerateProblemModal'
 import SectionHeading from './SectionHeading'
 import { useAuth } from '../authContext'
 import { api, type ProblemQuery } from '../api'
@@ -62,6 +64,7 @@ export function ProblemBank({ onOpen }: ProblemBankProps) {
   const [search, setSearch] = useState('')
   const [createOpen, setCreateOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
+  const [aiGenOpen, setAiGenOpen] = useState(false)
   const [extra, setExtra] = useState<{ token: string; rows: ProblemSummary[]; total: number } | null>(
     null,
   )
@@ -134,6 +137,14 @@ export function ProblemBank({ onOpen }: ProblemBankProps) {
         actions={
           staff ? (
             <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setAiGenOpen(true)}
+                className={buttonClass('subtle', 'text-xs border border-indigo-500/30 text-indigo-300 hover:text-white hover:border-indigo-500/60')}
+              >
+                <Bot className="h-4 w-4 text-indigo-400" aria-hidden="true" />
+                ✨ AI 智慧出題
+              </button>
               <button
                 type="button"
                 onClick={() => setImportOpen(true)}
@@ -339,6 +350,17 @@ export function ProblemBank({ onOpen }: ProblemBankProps) {
         defaultClassroomId={/^[1-9]\d*$/.test(classroomFilter) ? Number(classroomFilter) : null}
         onImported={() => {
           list.reload()
+        }}
+      />
+
+      <AIGenerateProblemModal
+        open={aiGenOpen}
+        onClose={() => setAiGenOpen(false)}
+        classrooms={classrooms}
+        defaultClassroomId={/^[1-9]\d*$/.test(classroomFilter) ? Number(classroomFilter) : null}
+        onProblemCreated={(problemId) => {
+          list.reload()
+          onOpen(problemId)
         }}
       />
     </div>

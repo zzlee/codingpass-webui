@@ -183,6 +183,9 @@ PROBLEM_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("teda_random_script", "TEXT"),
     ("wording_rules", "TEXT"),
     ("pdf_path", "VARCHAR(255)"),
+    ("is_exam", "BOOLEAN DEFAULT 0"),
+    ("exam_lock_required", "BOOLEAN DEFAULT 0"),
+    ("max_blur_count", "INTEGER DEFAULT 3"),
 )
 
 

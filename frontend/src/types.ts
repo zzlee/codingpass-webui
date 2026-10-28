@@ -553,3 +553,55 @@ export interface ExamMonitorResponse {
   active_students: number
   sessions: ExamSession[]
 }
+
+/* -------------------------------------------------------------------------- */
+/* AI Problem Generation                                                      */
+/* -------------------------------------------------------------------------- */
+
+export interface AIGenerateProblemRequest {
+  prompt: string
+  difficulty?: Difficulty
+  problem_code?: string
+  classroom_id?: number | null
+  is_exam?: boolean
+  exam_lock_required?: boolean
+  auto_import?: boolean
+  num_random_cases?: number
+}
+
+export interface AIGeneratedPackInfo {
+  problem_code: string
+  title: string
+  folder_path: string
+  zip_path?: string | null
+  has_pdf_or_html: boolean
+  has_ref_code: boolean
+  has_teda: boolean
+  has_rules: boolean
+  sample_count: number
+  created_at?: string | null
+}
+
+export interface AIGenerateProblemResponse {
+  problem_code: string
+  title: string
+  problem_id?: number | null
+  description: string
+  difficulty: Difficulty
+  time_limit_sec: number
+  memory_limit_mb: number
+  starter_code_cpp: string
+  starter_code_c: string
+  ref_code: string
+  teda_random_script: string
+  wording_rules: string
+  folder_path: string
+  zip_download_url?: string | null
+  files_generated: string[]
+  sample_cases: Array<{ input: string; output: string; explanation?: string }>
+  hidden_case_count: number
+  dual_run_verified: boolean
+  verification_details: Record<string, unknown>
+  warnings: string[]
+}
+

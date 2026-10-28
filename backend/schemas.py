@@ -922,3 +922,85 @@ class ExamMonitorResponse(BaseModel):
     max_blur_count: int
     active_students: int
     sessions: list[ExamSessionOut]
+
+
+# --------------------------------------------------------------------------- #
+# AI Problem Generation Schemas
+# --------------------------------------------------------------------------- #
+
+
+class AIGenerateProblemRequest(BaseModel):
+    """Body of ``POST /api/ai/generate-problem``."""
+
+    prompt: str = Field(
+        ...,
+        min_length=3,
+        max_length=5000,
+        description="Natural language instruction for the question to generate.",
+    )
+    difficulty: DifficultyLiteral = Field(
+        default="medium", description="Difficulty level of the problem."
+    )
+    problem_code: Optional[str] = Field(
+        default=None,
+        max_length=32,
+        description="Optional problem code, e.g. 'P1205'. If omitted, auto-assigned.",
+    )
+    classroom_id: Optional[int] = Field(
+        default=None, description="Optional classroom ID to pin the problem to."
+    )
+    is_exam: bool = Field(default=False, description="Whether to mark the problem as an exam.")
+    exam_lock_required: bool = Field(
+        default=False, description="Whether Windows Kiosk lockdown is required."
+    )
+    auto_import: bool = Field(
+        default=True,
+        description="Whether to immediately create Problem and TestCases in the database.",
+    )
+    num_random_cases: int = Field(
+        default=30,
+        ge=5,
+        le=50,
+        description="Number of random test cases to generate via TeDa.",
+    )
+
+
+class AIGeneratedPackInfo(BaseModel):
+    """Summary of one generated problem pack."""
+
+    problem_code: str
+    title: str
+    folder_path: str
+    zip_path: Optional[str] = None
+    has_pdf_or_html: bool = False
+    has_ref_code: bool = False
+    has_teda: bool = False
+    has_rules: bool = False
+    sample_count: int = 0
+    created_at: Optional[str] = None
+
+
+class AIGenerateProblemResponse(BaseModel):
+    """Response to ``POST /api/ai/generate-problem``."""
+
+    problem_code: str
+    title: str
+    problem_id: Optional[int] = None
+    description: str
+    difficulty: str
+    time_limit_sec: float
+    memory_limit_mb: int
+    starter_code_cpp: str
+    starter_code_c: str
+    ref_code: str
+    teda_random_script: str
+    wording_rules: str
+    folder_path: str
+    zip_download_url: Optional[str] = None
+    files_generated: list[str] = Field(default_factory=list)
+    sample_cases: list[dict] = Field(default_factory=list)
+    hidden_case_count: int = 0
+    dual_run_verified: bool = False
+    verification_details: dict = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+

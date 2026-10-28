@@ -11,6 +11,9 @@
  * of leaving a stale token in every panel.
  */
 import type {
+  AIGenerateProblemRequest,
+  AIGenerateProblemResponse,
+  AIGeneratedPackInfo,
   AIAnalyzeRequest,
   AIAnalyzeResponse,
   AIStatusResponse,
@@ -493,6 +496,17 @@ export const api = {
 
   forceSubmitExam: (sessionId: number) =>
     request<{ message: string }>(`/exams/${sessionId}/force-submit`, { method: 'POST' }),
+
+  // -- AI Problem Generation (codingpass-exam-skill) ---------------------
+  aiGenerateProblem: (payload: AIGenerateProblemRequest) =>
+    request<AIGenerateProblemResponse>('/ai/generate-problem', {
+      method: 'POST',
+      body: payload,
+      timeoutMs: 120_000,
+    }),
+
+  listAIGeneratedPacks: () =>
+    request<AIGeneratedPackInfo[]>('/ai/packs'),
 
   health: () => request<HealthResponse>('/health', { auth: false }),
 }
