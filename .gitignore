@@ -25,6 +25,10 @@ backend/.jwt_secret
 .pi/
 /tmp/cj-*
 .system_generated/
+test-results/
+frontend/test-results/
+playwright-report/
+frontend/playwright-report/
 
 # OS / Editor
 .DS_Store

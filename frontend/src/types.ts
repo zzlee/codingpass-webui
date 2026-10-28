@@ -264,6 +264,7 @@ export interface ProblemSummary {
   is_exam?: boolean
   exam_lock_required?: boolean
   max_blur_count?: number
+  tags?: string[]
 }
 
 /** `ProblemDetail` - `GET /api/problems/{id}` (samples only for students). */
@@ -301,7 +302,34 @@ export interface ProblemCreateRequest {
   classroom_id: number | null
   starter_code_c: string | null
   starter_code_cpp: string | null
+  tags?: string[]
+  is_exam?: boolean
+  exam_lock_required?: boolean
+  max_blur_count?: number
   test_cases: TestCaseDraft[]
+}
+
+/** Body of `PATCH /api/problems/{id}`. */
+export interface ProblemUpdateRequest {
+  title?: string
+  description?: string
+  difficulty?: Difficulty
+  time_limit_sec?: number
+  memory_limit_mb?: number
+  classroom_id?: number | null
+  is_exam?: boolean
+  exam_lock_required?: boolean
+  max_blur_count?: number
+  starter_code_c?: string | null
+  starter_code_cpp?: string | null
+  tags?: string[]
+}
+
+/** Body of `PUT /api/problems/{id}/testcases/{case_id}`. */
+export interface TestCaseUpdateRequest {
+  input?: string
+  expected_output?: string
+  is_sample?: boolean
 }
 
 /** `CaseVerdict` - verdict for one test case inside a graded submission. */

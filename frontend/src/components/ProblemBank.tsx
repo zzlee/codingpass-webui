@@ -16,6 +16,7 @@ import {
   BookOpen,
   Bot,
   Clock,
+  Edit3,
   Gauge,
   Layers,
   Lock,
@@ -24,10 +25,12 @@ import {
   School,
   Search,
   Sparkles,
+  Tag,
 } from 'lucide-react'
 
 import { DifficultyBadge, EmptyState, ErrorNotice, LoadingRow, MetaChip, Segmented, Spinner } from './ui'
 import ProblemCreateModal from './ProblemCreateModal'
+import ProblemEditModal from './ProblemEditModal'
 import ImportPackModal from './ImportPackModal'
 import AIGenerateProblemModal from './AIGenerateProblemModal'
 import SectionHeading from './SectionHeading'
@@ -50,6 +53,8 @@ const DIFFICULTY_OPTIONS: Array<{ value: DifficultyFilter; label: string }> = [
   { value: 'hard', label: 'Hard' },
 ]
 
+const QUICK_TAGS = ['全部', '迴圈', '陣列', '指標', '字串', '函式', '遞迴', '動態規劃', '排序搜尋', '數學運算']
+
 export interface ProblemBankProps {
   onOpen: (problemId: number) => void
 }
@@ -60,9 +65,11 @@ export function ProblemBank({ onOpen }: ProblemBankProps) {
 
   const [difficulty, setDifficulty] = useState<DifficultyFilter>('all')
   const [classroomFilter, setClassroomFilter] = useState<ClassFilter>('all')
+  const [selectedTag, setSelectedTag] = useState<string>('全部')
   const [mineOnly, setMineOnly] = useState(false)
   const [search, setSearch] = useState('')
   const [createOpen, setCreateOpen] = useState(false)
+  const [editingProblemId, setEditingProblemId] = useState<number | null>(null)
   const [importOpen, setImportOpen] = useState(false)
   const [aiGenOpen, setAiGenOpen] = useState(false)
   const [extra, setExtra] = useState<{ token: string; rows: ProblemSummary[]; total: number } | null>(
@@ -76,11 +83,10 @@ export function ProblemBank({ onOpen }: ProblemBankProps) {
     () => ({
       difficulty: difficulty === 'all' ? '' : difficulty,
       classroom_id: /^[1-9]\d*$/.test(classroomFilter) ? Number(classroomFilter) : undefined,
-      // The API has no "classroom_id IS NULL" filter, so the private bank is
-      // requested as `mine=true` and narrowed locally.
+      tag: selectedTag === '全部' ? undefined : selectedTag,
       mine: staff && (mineOnly || classroomFilter === 'private') ? true : undefined,
     }),
-    [difficulty, classroomFilter, mineOnly, staff],
+    [difficulty, classroomFilter, selectedTag, mineOnly, staff],
   )
   const filterKey = JSON.stringify(filters)
 
@@ -230,6 +236,31 @@ export function ProblemBank({ onOpen }: ProblemBankProps) {
         </span>
       </div>
 
+      {/* Tag Categorization Filter Bar */}
+      <div className="flex items-center gap-1.5 overflow-x-auto border-b border-slate-800/80 bg-slate-950/40 px-4 py-2">
+        <span className="flex items-center gap-1 text-[11px] font-semibold text-slate-400 shrink-0 mr-1">
+          <Tag className="h-3 w-3 text-indigo-400" />
+          <span>知識單元:</span>
+        </span>
+        {QUICK_TAGS.map((t) => {
+          const active = selectedTag === t
+          return (
+            <button
+              key={t}
+              type="button"
+              onClick={() => setSelectedTag(t)}
+              className={`rounded-full px-2.5 py-0.5 text-xs font-medium transition-colors shrink-0 ${
+                active
+                  ? 'border border-indigo-500/60 bg-indigo-500/20 text-indigo-200'
+                  : 'border border-slate-800 bg-slate-900/60 text-slate-400 hover:border-slate-700 hover:text-slate-200'
+              }`}
+            >
+              {t}
+            </button>
+          )
+        })}
+      </div>
+
       {/* List ------------------------------------------------------------ */}
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
         {error ? (
@@ -257,7 +288,7 @@ export function ProblemBank({ onOpen }: ProblemBankProps) {
                   className={buttonClass('primary', 'text-xs')}
                 >
                   <Plus className="h-4 w-4" aria-hidden="true" />
-                  Create Problem
+                  Create the first one
                 </button>
               ) : null
             }
@@ -266,11 +297,10 @@ export function ProblemBank({ onOpen }: ProblemBankProps) {
           <ul className="grid gap-2.5 lg:grid-cols-2 2xl:grid-cols-3">
             {visible.map((problem) => (
               <li key={problem.id}>
-                <button
-                  type="button"
+                <div
                   data-testid={`problem-card-${problem.id}`}
                   onClick={() => onOpen(problem.id)}
-                  className="group flex h-full w-full flex-col gap-2 rounded-xl border border-slate-800 bg-slate-900/40 p-3 text-left transition-colors hover:border-sky-500/60 hover:bg-slate-900/70 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+                  className="group flex h-full w-full cursor-pointer flex-col gap-2 rounded-xl border border-slate-800 bg-slate-900/40 p-3 text-left transition-colors hover:border-sky-500/60 hover:bg-slate-900/70 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
                 >
                   <div className="flex items-start gap-2">
                     <span className="min-w-0 flex-1">
@@ -284,6 +314,19 @@ export function ProblemBank({ onOpen }: ProblemBankProps) {
                     </span>
                     <DifficultyBadge difficulty={problem.difficulty} />
                   </div>
+
+                  {problem.tags && problem.tags.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-1">
+                      {problem.tags.map((t) => (
+                        <span
+                          key={t}
+                          className="rounded bg-indigo-500/15 border border-indigo-500/30 px-1.5 py-0.2 font-mono text-[9px] text-indigo-300"
+                        >
+                          #{t}
+                        </span>
+                      ))}
+                    </div>
+                  )}
 
                   <div className="flex flex-wrap items-center gap-1.5">
                     <MetaChip icon={<Layers className="h-3 w-3" aria-hidden="true" />}>
@@ -307,8 +350,24 @@ export function ProblemBank({ onOpen }: ProblemBankProps) {
                         class #{problem.classroom_id}
                       </MetaChip>
                     )}
+
+                    {staff && (
+                      <button
+                        type="button"
+                        data-testid={`btn-edit-problem-${problem.id}`}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          setEditingProblemId(problem.id)
+                        }}
+                        title="編輯題目資料、限制與測資"
+                        className="ml-auto inline-flex items-center gap-1 rounded border border-slate-700 bg-slate-800/80 px-2 py-0.5 text-[10px] text-slate-300 hover:border-sky-500 hover:text-white transition-colors"
+                      >
+                        <Edit3 className="h-3 w-3 text-sky-400" />
+                        <span>編輯題目</span>
+                      </button>
+                    )}
                   </div>
-                </button>
+                </div>
               </li>
             ))}
           </ul>
@@ -338,8 +397,6 @@ export function ProblemBank({ onOpen }: ProblemBankProps) {
         defaultClassroomId={/^[1-9]\d*$/.test(classroomFilter) ? Number(classroomFilter) : null}
         onCreated={() => {
           setCreateOpen(false)
-          // Refetch page 1: the new problem may sort into any filter, and the
-          // server stays the single source of truth for what the caller may see.
           list.reload()
         }}
       />
@@ -362,6 +419,20 @@ export function ProblemBank({ onOpen }: ProblemBankProps) {
         onProblemCreated={(problemId) => {
           list.reload()
           onOpen(problemId)
+        }}
+      />
+
+      <ProblemEditModal
+        open={editingProblemId !== null}
+        onClose={() => setEditingProblemId(null)}
+        problemId={editingProblemId}
+        classrooms={classrooms}
+        onUpdated={() => {
+          void list.reload()
+        }}
+        onDeleted={() => {
+          setEditingProblemId(null)
+          void list.reload()
         }}
       />
     </div>

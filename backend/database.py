@@ -186,6 +186,7 @@ PROBLEM_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("is_exam", "BOOLEAN DEFAULT 0"),
     ("exam_lock_required", "BOOLEAN DEFAULT 0"),
     ("max_blur_count", "INTEGER DEFAULT 3"),
+    ("tags", "TEXT DEFAULT ''"),
 )
 
 

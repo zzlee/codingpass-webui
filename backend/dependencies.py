@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import secrets
 from typing import Optional
@@ -262,6 +263,25 @@ def _classroom_counts(
     )
 
 
+def parse_tags(raw: Optional[str]) -> list[str]:
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return [str(x).strip() for x in parsed if str(x).strip()]
+    except Exception:
+        pass
+    return [t.strip() for t in raw.split(",") if t.strip()]
+
+
+def dump_tags(tags: Optional[list[str]]) -> str:
+    if not tags:
+        return ""
+    cleaned = [str(t).strip() for t in tags if str(t).strip()]
+    return json.dumps(cleaned, ensure_ascii=False)
+
+
 def _problem_summary(problem: Problem, counts: dict[int, tuple[int, int]]) -> ProblemSummary:
     samples, hidden = counts.get(problem.id, (0, 0))
     return ProblemSummary(
@@ -281,6 +301,10 @@ def _problem_summary(problem: Problem, counts: dict[int, tuple[int, int]]) -> Pr
         has_wording_rules=problem.has_wording_rules,
         has_random_generator=problem.has_random_generator,
         has_statement_pdf=problem.has_statement_pdf,
+        is_exam=problem.is_exam,
+        exam_lock_required=problem.exam_lock_required,
+        max_blur_count=problem.max_blur_count,
+        tags=parse_tags(problem.tags),
     )
 
 
@@ -304,6 +328,10 @@ def _problem_detail(problem: Problem, reveal_hidden: bool) -> ProblemDetail:
         has_wording_rules=problem.has_wording_rules,
         has_random_generator=problem.has_random_generator,
         has_statement_pdf=problem.has_statement_pdf,
+        is_exam=problem.is_exam,
+        exam_lock_required=problem.exam_lock_required,
+        max_blur_count=problem.max_blur_count,
+        tags=parse_tags(problem.tags),
         description=problem.description,
         starter_code_c=problem.starter_code_c,
         starter_code_cpp=problem.starter_code_cpp,

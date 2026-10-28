@@ -22,6 +22,7 @@ import {
   ArrowLeft,
   BookOpen,
   Clock,
+  Edit3,
   EyeOff,
   FileText,
   Gauge,
@@ -42,6 +43,7 @@ import AITutorPanel from './AITutorPanel'
 import CustomTestPanel, { type CustomTestResult } from './CustomTestPanel'
 import ExamLockdownOverlay from './ExamLockdownOverlay'
 import Markdown from './Markdown'
+import ProblemEditModal from './ProblemEditModal'
 import ResultPanel from './ResultPanel'
 import RevisionHistoryModal, { saveProblemRevision } from './RevisionHistoryModal'
 import { CopyButton, DifficultyBadge, EmptyState, ErrorNotice, MetaChip, Segmented, Spinner } from './ui'
@@ -116,6 +118,7 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
   const [customResult, setCustomResult] = useState<CustomTestResult | null>(null)
   const [runningCustom, setRunningCustom] = useState(false)
   const [historyOpen, setHistoryOpen] = useState(false)
+  const [editModalOpen, setEditModalOpen] = useState(false)
 
   const takeSnapshot = useCallback((trigger: 'run_custom' | 'run_samples' | 'submit' | 'manual') => {
     const current = stateRef.current
@@ -501,6 +504,17 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
               <span>📄 題目 PDF</span>
             </button>
           ) : null}
+          {isOwner && (
+            <button
+              type="button"
+              onClick={() => setEditModalOpen(true)}
+              title="在線編輯此題目內容、時間/記憶體限制與測資"
+              className="inline-flex items-center gap-1 rounded-md border border-sky-500/40 bg-sky-500/10 px-2 py-1 text-[11px] font-semibold text-sky-300 hover:bg-sky-500/20 transition-colors"
+            >
+              <Edit3 className="h-3 w-3" />
+              <span>編輯題目與測資</span>
+            </button>
+          )}
           {report && tone ? (
             <span className={`rounded-md border px-2 py-1 font-mono text-[10px] font-semibold ${tone.pill}`}>
               last {formatScore(report.score)} · {countText(report.passed, report.total)}
@@ -852,6 +866,21 @@ export function ProblemSolver({ problemId, onBack }: ProblemSolverProps) {
           setLanguage(restoredLanguage)
           setSources((prev) => ({ ...prev, [restoredLanguage]: restoredCode }))
           setNotice(`已成功還原程式碼快照 (${restoredLanguage.toUpperCase()})`)
+        }}
+      />
+
+      <ProblemEditModal
+        open={editModalOpen}
+        onClose={() => setEditModalOpen(false)}
+        problemId={problem.id}
+        classrooms={[]}
+        onUpdated={(updated) => {
+          setProblem(updated)
+          setNotice('題目資料與限制已更新')
+        }}
+        onDeleted={() => {
+          setEditModalOpen(false)
+          onBack()
         }}
       />
     </div>

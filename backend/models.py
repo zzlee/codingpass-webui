@@ -344,6 +344,8 @@ class Problem(Base):
     exam_lock_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     #: Max allowed window blur/switching events before flagging or termination.
     max_blur_count: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    #: JSON-encoded list of tags or topics (e.g. '["迴圈", "陣列"]').
+    tags: Mapped[Optional[str]] = mapped_column(Text, nullable=True, default="")
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=utcnow, index=True

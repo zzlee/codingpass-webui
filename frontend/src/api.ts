@@ -31,6 +31,7 @@ import type {
   ProblemDetail,
   ProblemImportResult,
   ProblemListResponse,
+  ProblemUpdateRequest,
   RegisterRequest,
   Role,
   SubmissionAIReviewResponse,
@@ -39,6 +40,8 @@ import type {
   SubmissionResult,
   TeacherReviewRequest,
   TestCaseDraft,
+  TestCasePublic,
+  TestCaseUpdateRequest,
   TokenResponse,
   User,
   UserListResponse,
@@ -318,6 +321,7 @@ export function saveBlob(blob: Blob, filename: string): void {
 export interface ProblemQuery {
   classroom_id?: number
   difficulty?: Difficulty | ''
+  tag?: string
   mine?: boolean
   limit?: number
   offset?: number
@@ -408,8 +412,23 @@ export const api = {
   createProblem: (payload: ProblemCreateRequest) =>
     request<ProblemDetail>('/problems', { method: 'POST', body: payload }),
 
+  updateProblem: (id: number, payload: ProblemUpdateRequest) =>
+    request<ProblemDetail>(`/problems/${id}`, { method: 'PATCH', body: payload }),
+
+  deleteProblem: (id: number) =>
+    request<{ ok: boolean; detail: string }>(`/problems/${id}`, { method: 'DELETE' }),
+
+  listProblemTestCases: (problemId: number) =>
+    request<TestCasePublic[]>(`/problems/${problemId}/testcases`),
+
   addTestCase: (problemId: number, payload: TestCaseDraft) =>
     request<ProblemDetail>(`/problems/${problemId}/testcases`, { method: 'POST', body: payload }),
+
+  updateTestCase: (problemId: number, testCaseId: number, payload: TestCaseUpdateRequest) =>
+    request<TestCasePublic>(`/problems/${problemId}/testcases/${testCaseId}`, { method: 'PUT', body: payload }),
+
+  deleteTestCase: (problemId: number, testCaseId: number) =>
+    request<{ ok: boolean; detail: string }>(`/problems/${problemId}/testcases/${testCaseId}`, { method: 'DELETE' }),
 
   importPack: (payload: { directory_path: string; classroom_id?: number | null; generate_hidden?: boolean; num_random?: number }) =>
     request<ProblemImportResult>('/problems/import-pack', { method: 'POST', body: payload }),

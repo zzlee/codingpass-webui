@@ -345,4 +345,52 @@ test.describe('CodingPass WebUI E2E Test Suite', () => {
     await page.getByRole('button', { name: '關閉' }).click()
     await expect(page.getByText('程式碼版本歷程與還原')).not.toBeVisible()
   })
+
+  test('Teacher Problem Visual Editor, Test Case Manager, and Tags interaction', async ({ page }) => {
+    await page.goto('/')
+
+    // Switch to Prof. Chen
+    const accountTrigger = page.locator('button[aria-haspopup="menu"]')
+    await accountTrigger.click()
+    await page.getByRole('menuitem', { name: /Prof\. Chen/ }).click()
+    await expect(page.locator('button[aria-haspopup="menu"]')).toContainText('Prof. Chen')
+
+    // Navigate to Problem Bank tab
+    await page.getByRole('button', { name: /Problem Bank/ }).click()
+    await expect(page.getByText('Two Sum (A + B Problem)')).toBeVisible()
+
+    // Verify Tag Categorization bar is visible
+    await expect(page.getByText('知識單元:')).toBeVisible()
+    await expect(page.getByRole('button', { name: '迴圈' })).toBeVisible()
+    await expect(page.getByRole('button', { name: '陣列' })).toBeVisible()
+
+    // Open ProblemEditModal on Problem #1
+    const editBtn = page.locator('[data-testid="btn-edit-problem-1"]')
+    await expect(editBtn).toBeVisible()
+    await editBtn.click()
+
+    // Verify ProblemEditModal header and tabs
+    await expect(page.getByText('題目與測資在線視覺化維護')).toBeVisible()
+    await expect(page.getByText('題目基本資料與限制 (Details & Limits)')).toBeVisible()
+
+    // In Tab 1: Check Tags section and Save button
+    await expect(page.getByText('題目標籤與單元分類 (Tags)')).toBeVisible()
+    const tagBtn = page.getByRole('button', { name: /\+ 基礎語法/ })
+    if (await tagBtn.isVisible()) {
+      await tagBtn.click()
+    }
+    await page.getByRole('button', { name: /儲存題目資料與限制/ }).click()
+    await expect(page.getByText('題目基本資料與限制已成功儲存！')).toBeVisible({ timeout: 5000 })
+
+    // Switch to Tab 2: Test Case Visual Manager
+    const testcasesTab = page.getByRole('button', { name: /測資視覺化管理/ })
+    await testcasesTab.click()
+    await expect(page.getByText('篩選顯示:')).toBeVisible()
+    await expect(page.getByRole('button', { name: /公開範例/ })).toBeVisible()
+    await expect(page.getByRole('button', { name: /隱藏測資/ })).toBeVisible()
+
+    // Close modal
+    await page.getByRole('button', { name: '關閉' }).click()
+    await expect(page.getByText('題目與測資在線視覺化維護')).not.toBeVisible()
+  })
 })

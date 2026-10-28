@@ -458,6 +458,7 @@ class ProblemCreate(BaseModel):
     is_exam: bool = Field(default=False, description="Flag problem as examination mode.")
     exam_lock_required: bool = Field(default=False, description="Require local agent lock.")
     max_blur_count: int = Field(default=3, ge=0, le=100, description="Max allowed window blurs.")
+    tags: list[str] = Field(default_factory=list, description="Tags or topic keywords.")
     starter_code_c: Optional[str] = Field(default=None, max_length=MAX_SOURCE_CHARS)
     starter_code_cpp: Optional[str] = Field(default=None, max_length=MAX_SOURCE_CHARS)
     test_cases: list[TestCaseIn] = Field(
@@ -473,6 +474,47 @@ class ProblemCreate(BaseModel):
     @classmethod
     def _normalise_starter(cls, value: Optional[str]) -> Optional[str]:
         return _lf(value)
+
+
+class ProblemUpdate(BaseModel):
+    """Body of ``PATCH /api/problems/{id}`` (teacher / admin only)."""
+
+    title: Optional[str] = Field(default=None, min_length=3, max_length=200)
+    description: Optional[str] = Field(default=None, max_length=MAX_DESCRIPTION_CHARS)
+    difficulty: Optional[DifficultyLiteral] = None
+    time_limit_sec: Optional[float] = Field(
+        default=None, ge=MIN_TIME_LIMIT_SEC, le=MAX_TIME_LIMIT_SEC
+    )
+    memory_limit_mb: Optional[int] = Field(
+        default=None, ge=MIN_MEMORY_LIMIT_MB, le=MAX_MEMORY_LIMIT_MB
+    )
+    classroom_id: Optional[int] = Field(
+        default=None, description="Set to 0 to unpublish from classroom to private bank."
+    )
+    is_exam: Optional[bool] = None
+    exam_lock_required: Optional[bool] = None
+    max_blur_count: Optional[int] = Field(default=None, ge=0, le=100)
+    starter_code_c: Optional[str] = Field(default=None, max_length=MAX_SOURCE_CHARS)
+    starter_code_cpp: Optional[str] = Field(default=None, max_length=MAX_SOURCE_CHARS)
+    tags: Optional[list[str]] = None
+
+    @field_validator("title", "description")
+    @classmethod
+    def _trim(cls, value: Optional[str]) -> Optional[str]:
+        return (value or "").strip() if value is not None else None
+
+    @field_validator("starter_code_c", "starter_code_cpp")
+    @classmethod
+    def _normalise_starter(cls, value: Optional[str]) -> Optional[str]:
+        return _lf(value) if value is not None else None
+
+
+class TestCaseUpdate(BaseModel):
+    """Body of ``PUT /api/problems/{id}/testcases/{case_id}``."""
+
+    input: Optional[str] = None
+    expected_output: Optional[str] = None
+    is_sample: Optional[bool] = None
 
 
 class ProblemSummary(BaseModel):
@@ -497,6 +539,7 @@ class ProblemSummary(BaseModel):
     is_exam: bool = False
     exam_lock_required: bool = False
     max_blur_count: int = 3
+    tags: list[str] = Field(default_factory=list)
 
 
 # Complete schema rebuild for circular model reference

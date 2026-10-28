@@ -55,6 +55,7 @@ try:
         _problem_counts,
         _problem_detail,
         _problem_summary,
+        dump_tags,
     )
     from ..models import (
         Classroom,
@@ -75,10 +76,13 @@ try:
         ProblemDetail,
         ProblemImportResult,
         ProblemListResponse,
+        ProblemUpdate,
         RubricScores,
         SubmissionCreate,
         SubmissionResult,
         TestCaseIn,
+        TestCasePublic,
+        TestCaseUpdate,
     )
     from ..services.judge import (
         _build_rubric,
@@ -116,6 +120,7 @@ except ImportError:
         _problem_counts,
         _problem_detail,
         _problem_summary,
+        dump_tags,
     )
     from models import (  # type: ignore[no-redef]
         Classroom,
@@ -136,10 +141,13 @@ except ImportError:
         ProblemDetail,
         ProblemImportResult,
         ProblemListResponse,
+        ProblemUpdate,
         RubricScores,
         SubmissionCreate,
         SubmissionResult,
         TestCaseIn,
+        TestCasePublic,
+        TestCaseUpdate,
     )
     from services.judge import (  # type: ignore[no-redef]
         _build_rubric,
@@ -217,6 +225,7 @@ async def list_problems(
     user: User = Depends(get_current_user),
     classroom_id: Optional[int] = Query(default=None, ge=1, description="Filter by class."),
     difficulty: Optional[DifficultyLiteral] = Query(default=None, description="Filter by difficulty."),
+    tag: Optional[str] = Query(default=None, description="Filter by tag keyword."),
     mine: bool = Query(default=False, description="Only problems created by me (teachers)."),
     limit: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
     offset: int = Query(default=0, ge=0),
@@ -227,6 +236,8 @@ async def list_problems(
         conditions.append(Problem.classroom_id == classroom_id)
     if difficulty is not None:
         conditions.append(Problem.difficulty == difficulty)
+    if tag:
+        conditions.append(Problem.tags.contains(tag.strip()))
     if mine:
         conditions.append(Problem.teacher_id == user.id)
 
@@ -279,6 +290,10 @@ async def create_problem(
         memory_limit_mb=payload.memory_limit_mb,
         teacher_id=teacher.id,
         classroom_id=payload.classroom_id,
+        tags=dump_tags(payload.tags),
+        is_exam=payload.is_exam,
+        exam_lock_required=payload.exam_lock_required,
+        max_blur_count=payload.max_blur_count,
         starter_code_c=DEFAULT_STARTER_C if default_starter_c is None else default_starter_c,
         starter_code_cpp=(
             DEFAULT_STARTER_CPP if default_starter_cpp is None else default_starter_cpp
@@ -317,6 +332,191 @@ async def read_problem(
     problem = _load_problem(db, problem_id)
     _assert_problem_visible(problem, user, db)
     return _problem_detail(problem, reveal_hidden=_can_manage_problem(problem, user))
+
+
+@router.patch(
+    "/{problem_id}",
+    response_model=ProblemDetail,
+    summary="Update a problem (teacher / admin only)",
+)
+async def update_problem(
+    problem_id: int,
+    payload: ProblemUpdate,
+    db: Session = Depends(get_db),
+    teacher: User = Depends(TeacherOnly),
+) -> ProblemDetail:
+    """Update metadata, description, limits, starter code, tags, or classroom."""
+    problem = _load_problem(db, problem_id)
+    if not _can_manage_problem(problem, teacher):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the author or an administrator may update this problem.",
+        )
+
+    if payload.classroom_id is not None:
+        if payload.classroom_id == 0:
+            problem.classroom_id = None
+        else:
+            classroom = db.get(Classroom, payload.classroom_id)
+            if classroom is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND, detail="Class not found."
+                )
+            if not teacher.is_admin and classroom.teacher_id != teacher.id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You can only publish problems to a class you teach.",
+                )
+            problem.classroom_id = payload.classroom_id
+
+    if payload.title is not None:
+        problem.title = payload.title
+    if payload.description is not None:
+        problem.description = payload.description
+    if payload.difficulty is not None:
+        problem.difficulty = payload.difficulty
+    if payload.time_limit_sec is not None:
+        problem.time_limit_sec = payload.time_limit_sec
+    if payload.memory_limit_mb is not None:
+        problem.memory_limit_mb = payload.memory_limit_mb
+    if payload.starter_code_c is not None:
+        problem.starter_code_c = payload.starter_code_c
+    if payload.starter_code_cpp is not None:
+        problem.starter_code_cpp = payload.starter_code_cpp
+    if payload.tags is not None:
+        problem.tags = dump_tags(payload.tags)
+    if payload.is_exam is not None:
+        problem.is_exam = payload.is_exam
+    if payload.exam_lock_required is not None:
+        problem.exam_lock_required = payload.exam_lock_required
+    if payload.max_blur_count is not None:
+        problem.max_blur_count = payload.max_blur_count
+
+    db.commit()
+    db.refresh(problem)
+    logger.info("teacher id=%s updated problem id=%s (%r)", teacher.id, problem.id, problem.title)
+    return _problem_detail(problem, reveal_hidden=True)
+
+
+@router.delete(
+    "/{problem_id}",
+    summary="Delete a problem (teacher / admin only)",
+)
+async def delete_problem(
+    problem_id: int,
+    db: Session = Depends(get_db),
+    teacher: User = Depends(TeacherOnly),
+) -> dict[str, object]:
+    """Delete a problem and all associated test cases and submissions."""
+    problem = _load_problem(db, problem_id)
+    if not _can_manage_problem(problem, teacher):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the author or an administrator may delete this problem.",
+        )
+    title = problem.title
+    db.delete(problem)
+    db.commit()
+    logger.info("teacher id=%s deleted problem id=%s (%r)", teacher.id, problem_id, title)
+    return {"ok": True, "detail": f"Problem '{title}' deleted."}
+
+
+@router.get(
+    "/{problem_id}/testcases",
+    response_model=list[TestCasePublic],
+    summary="List all test cases for management (teacher / admin only)",
+)
+async def list_problem_test_cases(
+    problem_id: int,
+    db: Session = Depends(get_db),
+    teacher: User = Depends(TeacherOnly),
+) -> list[TestCasePublic]:
+    """Retrieve both sample and hidden test cases for visual management."""
+    problem = _load_problem(db, problem_id)
+    if not _can_manage_problem(problem, teacher):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the author or an administrator may view all test cases.",
+        )
+    return [
+        TestCasePublic(
+            id=c.id,
+            input=c.input,
+            expected_output=c.expected_output,
+            is_sample=c.is_sample,
+        )
+        for c in problem.test_cases
+    ]
+
+
+@router.put(
+    "/{problem_id}/testcases/{test_case_id}",
+    response_model=TestCasePublic,
+    summary="Update a testcase (teacher / admin only)",
+)
+async def update_problem_test_case(
+    problem_id: int,
+    test_case_id: int,
+    payload: TestCaseUpdate,
+    db: Session = Depends(get_db),
+    teacher: User = Depends(TeacherOnly),
+) -> TestCasePublic:
+    """Update a test case's input, expected output, or sample visibility."""
+    problem = _load_problem(db, problem_id)
+    if not _can_manage_problem(problem, teacher):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the author or an administrator may update test cases.",
+        )
+    case = db.get(TestCase, test_case_id)
+    if case is None or case.problem_id != problem.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Test case not found for this problem.",
+        )
+    if payload.input is not None:
+        case.input = payload.input
+    if payload.expected_output is not None:
+        case.expected_output = payload.expected_output
+    if payload.is_sample is not None:
+        case.is_sample = payload.is_sample
+
+    db.commit()
+    db.refresh(case)
+    return TestCasePublic(
+        id=case.id,
+        input=case.input,
+        expected_output=case.expected_output,
+        is_sample=case.is_sample,
+    )
+
+
+@router.delete(
+    "/{problem_id}/testcases/{test_case_id}",
+    summary="Delete a testcase (teacher / admin only)",
+)
+async def delete_problem_test_case(
+    problem_id: int,
+    test_case_id: int,
+    db: Session = Depends(get_db),
+    teacher: User = Depends(TeacherOnly),
+) -> dict[str, object]:
+    """Delete a single test case from a problem."""
+    problem = _load_problem(db, problem_id)
+    if not _can_manage_problem(problem, teacher):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the author or an administrator may delete test cases.",
+        )
+    case = db.get(TestCase, test_case_id)
+    if case is None or case.problem_id != problem.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Test case not found for this problem.",
+        )
+    db.delete(case)
+    db.commit()
+    return {"ok": True, "detail": "Test case deleted."}
 
 
 @router.post(
